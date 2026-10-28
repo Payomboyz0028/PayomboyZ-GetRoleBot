@@ -2023,7 +2023,7 @@ _role_instance_socket = None
 def check_single_instance(port: int = 49285) -> bool:
     global _role_instance_socket
     # If running inside supervised hub worker, single instance is already enforced by supervisor port 49286
-    if os.environ.get("HUB_SUPERVISOR_DIR"):
+    if os.environ.get("HUB_SUPERVISOR_DIR") or os.environ.get("RENDER") or os.environ.get("RENDER_SERVICE_NAME") or os.environ.get("PORT"):
         return True
     try:
         _role_instance_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
