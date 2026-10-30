@@ -11,6 +11,7 @@ import json
 import asyncio
 from pathlib import Path
 from typing import Optional, Tuple, Dict, Any
+import aiohttp
 import discord
 from discord import app_commands
 
@@ -22,6 +23,7 @@ DEFAULT_STAFF_ROLE_ID = 1549535328753164418  # @PaYomz
 DEFAULT_CATEGORY_ID = 1549803476094029834    # First Gate / Welcome category
 COLOR_PRIMARY_GOLD = 0xF1C40F
 COLOR_EMBED_DARK = 0x1E1F22
+OFFICIAL_PAYOMBOYZ_TICKET_BANNER = "https://cdn.discordapp.com/attachments/1550921338653376522/1565340645864775721/payomboyz_support_tickets.gif?ex=6ae53554&is=6ae3e3d4&hm=92075115ace4cf848282a754b62913d18ddb16d7c09eefbee865dcafcd9237b7&"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -100,7 +102,7 @@ ticket_manager = TicketConfigManager()
 
 
 # ─────────────────────────────────────────────────────────────
-# 2. 🎨 Premium Panel Embed Builder
+# 2. 🎨 Premium Panel Embed & Components V2 Container Builder
 # ─────────────────────────────────────────────────────────────
 def build_ticket_panel_embed(guild_id: int) -> discord.Embed:
     cfg = ticket_manager.get_guild_cfg(guild_id)
@@ -135,11 +137,175 @@ def build_ticket_panel_embed(guild_id: int) -> discord.Embed:
         color=color_val
     )
 
-    if cfg.get("banner_url"):
-        embed.set_image(url=cfg["banner_url"])
+    banner = cfg.get("banner_url") or OFFICIAL_PAYOMBOYZ_TICKET_BANNER
+    if banner:
+        embed.set_image(url=banner)
 
     embed.set_footer(text="PAYOMBØYZ SUPPORT • พร้อมดูแลตลอด 24 ชั่วโมง")
     return embed
+
+
+def build_ticket_v2_payload(guild_id: Optional[int] = None) -> dict:
+    """Builds Discord Components V2 Container message (flags: 32768) matching Auto Quest style."""
+    banner = OFFICIAL_PAYOMBOYZ_TICKET_BANNER
+    color_val = COLOR_PRIMARY_GOLD
+    if guild_id:
+        cfg = ticket_manager.get_guild_cfg(guild_id)
+        if cfg.get("banner_url"):
+            banner = cfg["banner_url"]
+        if cfg.get("color"):
+            try:
+                color_val = int(cfg["color"].lstrip("#"), 16)
+            except Exception:
+                pass
+
+    return {
+        "flags": 32768,
+        "embeds": [],
+        "components": [
+            {
+                "type": 17,
+                "accent_color": color_val,
+                "components": [
+                    {
+                        "type": 10,
+                        "content": "## <a:pbg_wing_l:1562553182859563150> **PAYOMBØYZ SUPPORT TICKETS** <a:pbg_wing_r:1562553185325940748>\n### ⚡ **24/7 VIP CONCIERGE & CUSTOMER CARE**"
+                    },
+                    {"type": 14, "divider": True, "spacing": 1},
+                    {
+                        "type": 10,
+                        "content": (
+                            "> 👑 **ยินดีต้อนรับสู่ศูนย์บริการลูกค้าและซัพพอร์ต PAYOMBØYZ HUB**\n"
+                            "> 💬 **กรุณาเลือกประเภทหัวข้อจากเมนูด้านล่าง หรือกดปุ่มด่วน เพื่อเปิดตั๋วสนทนาส่วนตัวกับทีมงาน**\n\n"
+                            "📌 **หมวดหมู่บริการ (Select Service):**\n"
+                            "• 💬 **ปรึกษาทั่วไป (General Support)** — สอบถามข้อมูล แนะนำการใช้งาน\n"
+                            "• 🛠️ **ปัญหาสคริปต์ (Technical Support)** — แจ้งบั๊ก แก้ไขปัญหา รันสคริปต์ไม่ติด\n"
+                            "• 💰 **การชำระเงิน & ซื้อบริการ (Billing & Orders)** — ซื้อ SuperIP, จ้างทำสคริปต์, ตรวจสอบสลิป\n\n"
+                            "⚡ **ความเร็วในการให้บริการ:** ตอบกลับรวดเร็ว 5–15 นาที\n"
+                            "🔒 **ความปลอดภัย:** ห้องตั๋วเป็นแบบส่วนตัว (มีเพียงคุณและทีมงานเท่านั้นที่เข้าถึงได้)"
+                        )
+                    },
+                    {"type": 14, "divider": True, "spacing": 1},
+                    {
+                        "type": 1,
+                        "components": [
+                            {
+                                "type": 3,
+                                "custom_id": "ticket:select:category",
+                                "placeholder": "เลือกหัวข้อที่ต้องการติดต่อ (Select Issue Type)...",
+                                "min_values": 1,
+                                "max_values": 1,
+                                "options": [
+                                    {
+                                        "label": "💬 ปรึกษาทั่วไป (General Support)",
+                                        "value": "general",
+                                        "description": "สอบถามข้อมูลทั่วไป แนะนำระบบ หรือเรื่องอื่นๆ",
+                                        "emoji": {"name": "💬"}
+                                    },
+                                    {
+                                        "label": "🛠️ ปัญหาสคริปต์ (Technical Support)",
+                                        "value": "script",
+                                        "description": "แจ้งปัญหาสคริปต์ รันไม่ติด โดนเตะ หรือพบบั๊ก",
+                                        "emoji": {"name": "🛠️"}
+                                    },
+                                    {
+                                        "label": "💰 การชำระเงิน & สั่งซื้อ (Purchase & Billing)",
+                                        "value": "billing",
+                                        "description": "สั่งซื้อ SuperIP, จ้างทำสคริปต์, ส่งสลิป",
+                                        "emoji": {"name": "💰"}
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        "type": 1,
+                        "components": [
+                            {
+                                "type": 2,
+                                "style": 1,
+                                "custom_id": "ticket:btn:general",
+                                "label": "ปรึกษาทั่วไป",
+                                "emoji": {"name": "💬"}
+                            },
+                            {
+                                "type": 2,
+                                "style": 3,
+                                "custom_id": "ticket:btn:script",
+                                "label": "ปัญหาสคริปต์",
+                                "emoji": {"name": "🛠️"}
+                            },
+                            {
+                                "type": 2,
+                                "style": 2,
+                                "custom_id": "ticket:btn:billing",
+                                "label": "การชำระเงิน",
+                                "emoji": {"name": "💰"}
+                            }
+                        ]
+                    },
+                    {"type": 14, "divider": True, "spacing": 1},
+                    {
+                        "type": 10,
+                        "content": "**POWERED BY PAYOMBOYZ VIP CONCIERGE • พร้อมดูแลตลอด 24 ชั่วโมง**"
+                    },
+                    {"type": 14, "divider": True, "spacing": 1},
+                    {
+                        "type": 12,
+                        "items": [
+                            {
+                                "media": {
+                                    "url": banner
+                                }
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+    }
+
+
+async def send_ticket_v2_panel(channel_id: int, bot_token: Optional[str] = None, guild_id: Optional[int] = None) -> Tuple[bool, Any]:
+    """Sends native Discord Components V2 Container ticket panel via REST API v10."""
+    token = bot_token or os.environ.get("DISCORD_TOKEN") or os.environ.get("BOT_TOKEN")
+    if not token:
+        return False, "No bot token provided"
+    url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
+    headers = {
+        "Authorization": f"Bot {token}",
+        "Content-Type": "application/json",
+        "User-Agent": "DiscordBot (https://github.com/Payomboyz0028, 1.0)"
+    }
+    payload = build_ticket_v2_payload(guild_id=guild_id)
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, headers=headers, json=payload) as r:
+            try:
+                data = await r.json()
+            except Exception:
+                data = await r.text()
+            return r.status in (200, 201), data
+
+
+async def edit_ticket_v2_panel(channel_id: int, message_id: int, bot_token: Optional[str] = None, guild_id: Optional[int] = None) -> Tuple[bool, Any]:
+    """Updates existing message to native Discord Components V2 Container via REST API v10."""
+    token = bot_token or os.environ.get("DISCORD_TOKEN") or os.environ.get("BOT_TOKEN")
+    if not token:
+        return False, "No bot token provided"
+    url = f"https://discord.com/api/v10/channels/{channel_id}/messages/{message_id}"
+    headers = {
+        "Authorization": f"Bot {token}",
+        "Content-Type": "application/json",
+        "User-Agent": "DiscordBot (https://github.com/Payomboyz0028, 1.0)"
+    }
+    payload = build_ticket_v2_payload(guild_id=guild_id)
+    async with aiohttp.ClientSession() as session:
+        async with session.patch(url, headers=headers, json=payload) as r:
+            try:
+                data = await r.json()
+            except Exception:
+                data = await r.text()
+            return r.status == 200, data
 
 
 # ─────────────────────────────────────────────────────────────
@@ -635,6 +801,13 @@ async def update_live_panel_message(bot: discord.Client, guild_id: int) -> Tuple
 
     if not ch_id or not msg_id:
         return False, "ยังไม่มีการบันทึก Message ID ของ Panel ในเซิร์ฟเวอร์นี้"
+
+    # Attempt V2 Container PATCH via REST API v10 first
+    token = getattr(bot, "http", None) and getattr(bot.http, "token", None) or os.environ.get("DISCORD_TOKEN") or os.environ.get("BOT_TOKEN")
+    if token:
+        ok, res = await edit_ticket_v2_panel(ch_id, msg_id, bot_token=token, guild_id=guild_id)
+        if ok:
+            return True, "อัปเดต Components V2 Container Panel บน Discord สำเร็จแล้ว!"
 
     guild = bot.get_guild(guild_id)
     if not guild:

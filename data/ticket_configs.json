@@ -3,11 +3,11 @@
     "staff_role_id": 1549535328753164418,
     "category_id": 1549803476094029834,
     "log_channel_id": null,
-    "panel_channel_id": null,
-    "panel_message_id": null,
+    "panel_channel_id": 1550921338653376522,
+    "panel_message_id": 1561096674389000193,
     "title": "👑 PAYOMBØYZ SUPPORT TICKETS",
     "description": null,
-    "banner_url": null,
+    "banner_url": "https://cdn.discordapp.com/attachments/1550921338653376522/1565340645864775721/payomboyz_support_tickets.gif?ex=6ae53554&is=6ae3e3d4&hm=92075115ace4cf848282a754b62913d18ddb16d7c09eefbee865dcafcd9237b7&",
     "color": "#F1C40F",
     "counter": 6
   }

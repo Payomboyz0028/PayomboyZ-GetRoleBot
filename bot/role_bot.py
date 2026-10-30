@@ -1740,6 +1740,8 @@ async def cmd_set_ticket(
     from bot.ticket_system import (
         ticket_manager,
         build_ticket_panel_embed,
+        build_ticket_v2_payload,
+        send_ticket_v2_panel,
         TicketPanelView,
         DEFAULT_STAFF_ROLE_ID,
         DEFAULT_CATEGORY_ID
@@ -1765,40 +1767,52 @@ async def cmd_set_ticket(
     if updates:
         ticket_manager.update_guild_cfg(guild_id, **updates)
 
-    embed = build_ticket_panel_embed(guild_id)
-    view = TicketPanelView()
+    # Attempt V2 Container creation first via REST API v10
+    token = getattr(role_bot, "http", None) and getattr(role_bot.http, "token", None) or os.environ.get("DISCORD_TOKEN") or os.environ.get("BOT_TOKEN")
+    msg_id = None
+    if token:
+        ok, res = await send_ticket_v2_panel(target_channel.id, bot_token=token, guild_id=guild_id)
+        if ok and isinstance(res, dict) and "id" in res:
+            msg_id = int(res["id"])
 
-    try:
-        msg = await target_channel.send(embed=embed, view=view)
-        ticket_manager.update_guild_cfg(
-            guild_id,
-            panel_channel_id=target_channel.id,
-            panel_message_id=msg.id
-        )
+    if not msg_id:
+        embed = build_ticket_panel_embed(guild_id)
+        view = TicketPanelView()
+        try:
+            msg = await target_channel.send(embed=embed, view=view)
+            msg_id = msg.id
+        except discord.Forbidden:
+            await interaction.response.send_message(
+                f"❌ บอทไม่มีสิทธิ์ส่งข้อความในช่อง {target_channel.mention} กรุณาตรวจสอบสิทธิ์ของบอท",
+                ephemeral=True
+            )
+            return
+        except Exception as e:
+            await interaction.response.send_message(
+                f"❌ เกิดข้อผิดพลาดในการติดตั้ง Panel: `{e}`",
+                ephemeral=True
+            )
+            return
 
-        cfg = ticket_manager.get_guild_cfg(guild_id)
-        s_role_id = cfg.get("staff_role_id", DEFAULT_STAFF_ROLE_ID)
-        s_role = interaction.guild.get_role(s_role_id)
-        s_mention = s_role.mention if s_role else f"`{s_role_id}`"
+    ticket_manager.update_guild_cfg(
+        guild_id,
+        panel_channel_id=target_channel.id,
+        panel_message_id=msg_id
+    )
 
-        await interaction.response.send_message(
-            f"✅ **ติดตั้ง Ticket Panel สำเร็จแล้ว!**\n"
-            f"• **ห้องติดตั้ง:** {target_channel.mention}\n"
-            f"• **ทีมงานดูแล:** {s_mention}\n"
-            f"• **Message ID:** `{msg.id}`\n\n"
-            f"💡 *หากต้องการแก้ไขข้อมูล Panel ย้อนหลัง ให้ใช้คำสั่ง `/ticket config`*",
-            ephemeral=True
-        )
-    except discord.Forbidden:
-        await interaction.response.send_message(
-            f"❌ บอทไม่มีสิทธิ์ส่งข้อความในช่อง {target_channel.mention} กรุณาตรวจสอบสิทธิ์ของบอท",
-            ephemeral=True
-        )
-    except Exception as e:
-        await interaction.response.send_message(
-            f"❌ เกิดข้อผิดพลาดในการติดตั้ง Panel: `{e}`",
-            ephemeral=True
-        )
+    cfg = ticket_manager.get_guild_cfg(guild_id)
+    s_role_id = cfg.get("staff_role_id", DEFAULT_STAFF_ROLE_ID)
+    s_role = interaction.guild.get_role(s_role_id)
+    s_mention = s_role.mention if s_role else f"`{s_role_id}`"
+
+    await interaction.response.send_message(
+        f"✅ **ติดตั้ง Ticket Panel สำเร็จแล้ว!**\n"
+        f"• **ห้องติดตั้ง:** {target_channel.mention}\n"
+        f"• **ทีมงานดูแล:** {s_mention}\n"
+        f"• **Message ID:** `{msg_id}`\n\n"
+        f"💡 *หากต้องการแก้ไขข้อมูล Panel ย้อนหลัง ให้ใช้คำสั่ง `/ticket config`*",
+        ephemeral=True
+    )
 
 role_bot.tree.add_command(set_command_group)
 
