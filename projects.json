@@ -374,7 +374,7 @@
     "id": "pbg-free-z6ne",
     "name": "PBG-FREE-Z6NE",
     "type": "get_role",
-    "role_id": 1550618385509781500,
+    "role_id": 1550618385509781504,
     "require_key": false,
     "default_script": "loadstring(game:HttpGet(\"https://payomboyzcreative.online/loader/scripthub\"))()",
     "maps": [
