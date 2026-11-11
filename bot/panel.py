@@ -92,7 +92,7 @@ LOADER_AI_DUMP = 'loadstring(game:HttpGet("https://payomboyzcreative.online/load
 ALLOWED_COMMAND_ROLES = {BOT_ROLE_ID, ADMIN_ROLE_ID, ROLE_SUPER_IP, DEFAULT_VVIP_ROLE_ID, ROLE_VIP, ROLE_AI_DUMP}
 
 # คีย์พิเศษที่สามารถใช้ได้หลายครั้งโดยไม่โดนลบ
-SPECIAL_KEY = "PAYOMVVIP280342PBGZ19"
+SPECIAL_KEY = os.getenv("SPECIAL_KEY", "").strip()
 
 # ไฟล์จัดเก็บข้อมูล
 DB_FILE = BASE_DIR / "vvip_keys.json"
@@ -2742,7 +2742,7 @@ class RedeemKeyModal(discord.ui.Modal, title="Redeem a key"):
 
         # 1. คีย์พิเศษ (ใช้ซ้ำได้)
 
-        if key == SPECIAL_KEY:
+        if SPECIAL_KEY and key == SPECIAL_KEY:
 
             if key_only:
 
@@ -3055,7 +3055,7 @@ class RedeemKeyModal(discord.ui.Modal, title="Redeem a key"):
 
         cloud_api_url = os.getenv("WHITELIST_API_URL", "https://payomboyzcreative.online/api/v1/keys")
 
-        cloud_api_key = os.getenv("WHITELIST_API_KEY", "d23c5d8d0eeaeb08b49048c566f42daee80a924f50e882c2")
+        cloud_api_key = os.getenv("WHITELIST_API_KEY", "")
 
         cloud_redeem_success = False
 
@@ -3122,7 +3122,12 @@ class RedeemKeyModal(discord.ui.Modal, title="Redeem a key"):
                 }
                 upsert_project(project)
 
-                expiry_msg = f"• **วันหมดอายุ:** `{expires_at}`\n" if expires_at else "• **ระยะเวลา:** `ถาวร (Lifetime)`\n"
+                is_life = bool(res_data.get("is_lifetime"))
+                dur_d = res_data.get("duration_days") or 30
+                expiry_msg = (
+                    f"• **วันหมดอายุ:** `{expires_at}`\n" if expires_at else
+                    ("• **ระยะเวลา:** `♾️ ถาวร (Lifetime)`\n" if is_life else f"• **ระยะเวลา:** `⏳ {dur_d} วัน (เริ่มนับเมื่อรัน HWID ครั้งแรก)`\n")
+                )
                 embed = discord.Embed(
                     title=f"{EMOJI_KING} ยืนยันคีย์สำเร็จ (payomboyz.shop)",
                     description=(
@@ -3179,7 +3184,7 @@ class RedeemKeyModal(discord.ui.Modal, title="Redeem a key"):
 # =========================================================================
 
 PAYOMBOYZ_API_URL = os.getenv("WHITELIST_API_URL", "https://payomboyzcreative.online/api/v1/keys")
-PAYOMBOYZ_MASTER_KEY = os.getenv("WHITELIST_API_KEY", "d23c5d8d0eeaeb08b49048c566f42daee80a924f50e882c2")
+PAYOMBOYZ_MASTER_KEY = os.getenv("WHITELIST_API_KEY", "")
 
 async def fetch_cloud_user_keys(discord_id: str) -> List[dict]:
     """Fetch user keys from central Cloud Whitelist API (Supabase)"""
@@ -3203,7 +3208,8 @@ async def fetch_cloud_user_keys(discord_id: str) -> List[dict]:
                         "role": item.get("role", "VIP"),
                         "status": item.get("status", "active"),
                         "expires_at": item.get("expires_at"),
-                        "isLifetime": item.get("isLifetime", not item.get("expires_at")),
+                        "isLifetime": bool(item.get("is_lifetime") if item.get("is_lifetime") is not None else item.get("isLifetime", False)),
+                        "duration_days": item.get("duration_days"),
                         "created_at": item.get("created_at")
                     })
     except Exception as e:
@@ -3512,7 +3518,10 @@ class SCLinkKeyModal(discord.ui.Modal, title="ผูกคีย์ (Link Licens
                         granted_roles.append(role)
 
             expires_at = res_data.get("expires_at")
-            exp_text = f"• **สถานะ:** `ใช้งานได้ (Active)`\n• **ระดับสิทธิ์:** `{role_title}`\n• **หมดอายุ:** `{expires_at if expires_at else '♾️ ถาวร (Lifetime)'}`"
+            is_life = bool(res_data.get("is_lifetime"))
+            dur_d = res_data.get("duration_days") or 30
+            exp_val = expires_at if expires_at else ("♾️ ถาวร (Lifetime)" if is_life else f"⏳ {dur_d} วัน (เริ่มนับเมื่อรัน HWID ครั้งแรก)")
+            exp_text = f"• **สถานะ:** `ใช้งานได้ (Active)`\n• **ระดับสิทธิ์:** `{role_title}`\n• **หมดอายุ:** `{exp_val}`"
             role_line = f"\n{EMOJI_PAYOMBOYZ} **บทบาทที่ได้รับ:** " + (", ".join(r.mention for r in granted_roles) if granted_roles else f"`{role_title}`")
 
             embed = discord.Embed(
@@ -3599,7 +3608,10 @@ class AIDumpLinkKeyModal(discord.ui.Modal, title="ผูกคีย์ (AI Dump
                         granted_roles.append(role)
 
             expires_at = res_data.get("expires_at")
-            exp_text = f"• **สถานะ:** `ใช้งานได้ (Active)`\n• **ระดับสิทธิ์:** `{role_title}`\n• **หมดอายุ:** `{expires_at if expires_at else '♾️ ถาวร (Lifetime)'}`"
+            is_life = bool(res_data.get("is_lifetime"))
+            dur_d = res_data.get("duration_days") or 30
+            exp_val = expires_at if expires_at else ("♾️ ถาวร (Lifetime)" if is_life else f"⏳ {dur_d} วัน (เริ่มนับเมื่อรัน HWID ครั้งแรก)")
+            exp_text = f"• **สถานะ:** `ใช้งานได้ (Active)`\n• **ระดับสิทธิ์:** `{role_title}`\n• **หมดอายุ:** `{exp_val}`"
             role_line = f"\n{EMOJI_PAYOMBOYZ} **บทบาทที่ได้รับ:** " + (", ".join(r.mention for r in granted_roles) if granted_roles else f"`{role_title}`")
 
             embed = discord.Embed(
@@ -3706,7 +3718,8 @@ class ScriptCenterPanelView(discord.ui.View):
                 elif k.get("expires_at"):
                     exp_lines.append(f"• `{k['key'][:8]}...{k['key'][-4:]}` [{r_name}] ➔ 📅 หมดอายุ: `{k['expires_at']}`")
                 else:
-                    exp_lines.append(f"• `{k['key'][:8]}...{k['key'][-4:]}` [{r_name}] ➔ {EMOJI_CHILL} ใช้งานได้")
+                    dur_d = k.get("duration_days") or 30
+                    exp_lines.append(f"• `{k['key'][:8]}...{k['key'][-4:]}` [{r_name}] ➔ ⏳ {dur_d} วัน (เริ่มนับเมื่อรัน HWID ครั้งแรก)")
             txt = "\n".join(exp_lines)
 
         role_note = ""
@@ -3849,7 +3862,8 @@ class AIDumpKeyManagementPanelView(discord.ui.View):
                 elif k.get("expires_at"):
                     exp_lines.append(f"• `{k['key'][:8]}...{k['key'][-4:]}` [{r_name}] ➔ 📅 หมดอายุ: `{k['expires_at']}`")
                 else:
-                    exp_lines.append(f"• `{k['key'][:8]}...{k['key'][-4:]}` [{r_name}] ➔ {EMOJI_CHILL} ใช้งานได้")
+                    dur_d = k.get("duration_days") or 30
+                    exp_lines.append(f"• `{k['key'][:8]}...{k['key'][-4:]}` [{r_name}] ➔ ⏳ {dur_d} วัน (เริ่มนับเมื่อรัน HWID ครั้งแรก)")
             txt = "\n".join(exp_lines)
 
         role_note = ""
