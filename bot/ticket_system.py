@@ -340,7 +340,8 @@ class TicketControlView(discord.ui.View):
         custom_id="ticket:control:close"
     )
     async def btn_close(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(TicketCloseConfirmModal())
+        if not interaction.response.is_done():
+            await interaction.response.send_modal(TicketCloseConfirmModal())
 
     @discord.ui.button(
         label="บันทึกประวัติ (Transcript)",
@@ -727,15 +728,21 @@ async def execute_close_ticket(interaction: discord.Interaction, reason: str = "
     guild = interaction.guild
 
     if not isinstance(channel, discord.TextChannel):
-        await interaction.response.send_message("❌ คำสั่งนี้ใช้ได้เฉพาะในห้องตั๋ว", ephemeral=True)
+        if interaction.response.is_done():
+            await interaction.followup.send("❌ คำสั่งนี้ใช้ได้เฉพาะในห้องตั๋ว", ephemeral=True)
+        else:
+            await interaction.response.send_message("❌ คำสั่งนี้ใช้ได้เฉพาะในห้องตั๋ว", ephemeral=True)
         return
 
     tdata = ticket_manager.get_ticket(channel.id)
 
-    await interaction.response.send_message(
-        f"🔒 **กำลังปิดตั๋ว...**\n• **เหตุผล:** `{reason}`\n• บันทึก Transcript และห้องจะถูกลบใน **5 วินาที**",
-        ephemeral=False
+    close_msg = (
+        f"🔒 **กำลังปิดตั๋ว...**\n• **เหตุผล:** `{reason}`\n• บันทึก Transcript และห้องจะถูกลบใน **5 วินาที**"
     )
+    if interaction.response.is_done():
+        await interaction.followup.send(close_msg, ephemeral=False)
+    else:
+        await interaction.response.send_message(close_msg, ephemeral=False)
 
     # 1. Generate Transcript
     transcript_file, msg_count = await generate_ticket_transcript(channel)

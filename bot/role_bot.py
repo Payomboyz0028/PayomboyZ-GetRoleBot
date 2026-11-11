@@ -36,6 +36,9 @@ intents.guilds = True
 role_bot = commands.Bot(command_prefix=config.COMMAND_PREFIX, intents=intents, help_command=None)
 install_bot_monitor(role_bot, "role")
 PROJECT_NAME = "🛡️ PAYOMBØYZ GET-ROLE & SCRIPT SYSTEM"
+_cloud_synced_once = False
+_views_registered = False
+_commands_synced = False
 
 
 # =========================================================================
@@ -43,6 +46,7 @@ PROJECT_NAME = "🛡️ PAYOMBØYZ GET-ROLE & SCRIPT SYSTEM"
 # =========================================================================
 @role_bot.event
 async def on_ready():
+    global _cloud_synced_once, _views_registered, _commands_synced
     print("=" * 64)
     print("  🛡️ PAYOMBØYZ GET-ROLE & GET-SCRIPT SYSTEM READY")
     print("=" * 64)
@@ -55,33 +59,39 @@ async def on_ready():
     print(f"🏰 Connected Guilds: {len(role_bot.guilds)}")
     print("=" * 64)
 
-    # 0. ซิงค์โปรเจกต์จาก Cloud API (payomboyzcreative.online)
-    try:
-        synced_p = await panel.sync_projects_from_cloud()
-        print(f"[+] on_ready: Synced {len(synced_p)} projects from payomboyzcreative.online API", flush=True)
-    except Exception as se:
-        print(f"[-] on_ready sync_projects notice: {se}", flush=True)
-
-    # 1. โหลดและลงทะเบียน Persistent Views ทั้งหมด
-    panel.register_all_panel_views(role_bot)
-
-    # 2. Ensure no duplicate guild-specific commands exist (clean up guild overrides)
-    for guild in role_bot.guilds:
+    # 0. ซิงค์โปรเจกต์จาก Cloud API (payomboyzcreative.online) ครั้งแรกที่เชื่อมต่อ
+    if not _cloud_synced_once:
+        _cloud_synced_once = True
         try:
-            guild_cmds = await role_bot.tree.fetch_commands(guild=guild)
-            if guild_cmds:
-                role_bot.tree.clear_commands(guild=guild)
-                await role_bot.tree.sync(guild=guild)
-                print(f"[+] Cleared {len(guild_cmds)} duplicate guild commands from {guild.name} ({guild.id}).", flush=True)
-        except Exception as ge:
-            print(f"[-] Guild command cleanup notice for {guild.id}: {ge}", flush=True)
+            synced_p = await panel.sync_projects_from_cloud()
+            print(f"[+] on_ready: Synced {len(synced_p)} projects from payomboyzcreative.online API", flush=True)
+        except Exception as se:
+            print(f"[-] on_ready sync_projects notice: {se}", flush=True)
 
-    # 3. Publish commands globally only (prevents duplicates in Discord UI)
-    try:
-        synced = await role_bot.tree.sync()
-        print(f"[+] Synced {len(synced)} Get-ROLE global slash commands successfully.", flush=True)
-    except Exception as e:
-        print(f"[-] Get-ROLE global slash sync failed: {e}", flush=True)
+    # 1. โหลดและลงทะเบียน Persistent Views ทั้งหมด (ครั้งเดียวต่อ Process)
+    if not _views_registered:
+        panel.register_all_panel_views(role_bot)
+        _views_registered = True
+
+    if not _commands_synced:
+        # 2. Ensure no duplicate guild-specific commands exist (clean up guild overrides)
+        for guild in role_bot.guilds:
+            try:
+                guild_cmds = await role_bot.tree.fetch_commands(guild=guild)
+                if guild_cmds:
+                    role_bot.tree.clear_commands(guild=guild)
+                    await role_bot.tree.sync(guild=guild)
+                    print(f"[+] Cleared {len(guild_cmds)} duplicate guild commands from {guild.name} ({guild.id}).", flush=True)
+            except Exception as ge:
+                print(f"[-] Guild command cleanup notice for {guild.id}: {ge}", flush=True)
+
+        # 3. Publish commands globally only (prevents duplicates in Discord UI)
+        try:
+            synced = await role_bot.tree.sync()
+            _commands_synced = True
+            print(f"[+] Synced {len(synced)} Get-ROLE global slash commands successfully.", flush=True)
+        except Exception as e:
+            print(f"[-] Get-ROLE global slash sync failed: {e}", flush=True)
 
     await role_bot.change_presence(
         activity=discord.Activity(
@@ -264,7 +274,11 @@ async def cmd_sync_projects(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     synced = await panel.sync_projects_from_cloud()
     if synced:
-        p_list = "\n".join([f"• `{p.get('id')}`: **{p.get('name')}** (Role ID: `{p.get('role_id')}`)" for p in synced])
+        try:
+            panel.register_all_panel_views(role_bot)
+        except Exception:
+            pass
+        p_list = "\n".join([f"• `{p.get('id')}`: **{p.get('name')}** (Role ID: `{p.get('role_id')}`)" for p in synced])[:1600]
         await interaction.followup.send(
             f"✅ **ซิงค์โปรเจกต์สำเร็จ ({len(synced)} โปรเจกต์):**\n{p_list}\n\n"
             f"💡 ใช้คำสั่ง `/setup_panel` เพื่อติดตั้งแผงควบคุมโปรเจกต์ที่ซิงค์มาได้ทันที",
@@ -1664,6 +1678,7 @@ async def cmd_oauth_info(interaction: discord.Interaction):
     channel="ห้องที่ต้องการติดตั้งแผงดึง Token (เว้นว่างไว้ = ห้องปัจจุบัน)",
     title="หัวข้อของกล่องข้อความ Panel (เว้นว่างไว้จะใช้ค่าเริ่มต้น)",
     description="ข้อความอธิบายใน Panel (เว้นว่างไว้จะใช้ค่าเริ่มต้น)",
+    banner_url="ลิงก์รูปภาพ GIF หรือ Banner ด้านล่าง Embed (เว้นว่างไว้จะใช้ Banner เริ่มต้น)",
     color="รหัสสี Embed Hex เช่น #5865F2 หรือ blue, red, gold, purple"
 )
 @panel.staff_only()
@@ -1672,22 +1687,18 @@ async def cmd_find_token(
     channel: Optional[discord.TextChannel] = None,
     title: Optional[str] = None,
     description: Optional[str] = None,
+    banner_url: Optional[str] = None,
     color: Optional[str] = None
 ):
     target_channel = channel or interaction.channel
     from bot.token_finder_panel import FindTokenPanelView, build_find_token_panel_embed
-    embed = build_find_token_panel_embed(title=title, description=description, color_hex=color)
+    embed = build_find_token_panel_embed(title=title, description=description, color_hex=color, banner_url=banner_url)
     view = FindTokenPanelView()
 
-    notice = (
-        "💡 **คำแนะนำ:** ระบบดึง Token และระบบ Auto Quest เชื่อมต่อทำงานร่วมกันอย่างสมบูรณ์ที่บอท **พยอมบอยหมูสับจัดให้** (`1535323629821362337`)\n"
-        "สมาชิกสามารถกดปุ่ม **[🔑 GET TOKEN]** หรือใช้ `/find_token` เพื่อดึง Token แล้วกดรัน Auto Quest ได้ทันที 1-Click!"
-    )
-
     try:
-        msg = await target_channel.send(content=notice, embed=embed, view=view)
+        msg = await target_channel.send(embed=embed, view=view)
         await interaction.response.send_message(
-            f"✅ **ติดตั้งแผงดึง Token สำเร็จ!** (ย้ายฐานระบบไปยังบอท Auto Quest พยอมบอยหมูสับจัดให้ เรียบร้อย)\n"
+            f"✅ **ติดตั้งแผงดึง Token สำเร็จ!**\n"
             f"• **ช่อง:** {target_channel.mention}\n"
             f"• **Message ID:** `{msg.id}`",
             ephemeral=True
@@ -1767,6 +1778,9 @@ async def cmd_set_ticket(
     if updates:
         ticket_manager.update_guild_cfg(guild_id, **updates)
 
+    if not interaction.response.is_done():
+        await interaction.response.defer(ephemeral=True)
+
     # Attempt V2 Container creation first via REST API v10
     token = getattr(role_bot, "http", None) and getattr(role_bot.http, "token", None) or os.environ.get("DISCORD_TOKEN") or os.environ.get("BOT_TOKEN")
     msg_id = None
@@ -1782,13 +1796,13 @@ async def cmd_set_ticket(
             msg = await target_channel.send(embed=embed, view=view)
             msg_id = msg.id
         except discord.Forbidden:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"❌ บอทไม่มีสิทธิ์ส่งข้อความในช่อง {target_channel.mention} กรุณาตรวจสอบสิทธิ์ของบอท",
                 ephemeral=True
             )
             return
         except Exception as e:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"❌ เกิดข้อผิดพลาดในการติดตั้ง Panel: `{e}`",
                 ephemeral=True
             )
@@ -1805,7 +1819,7 @@ async def cmd_set_ticket(
     s_role = interaction.guild.get_role(s_role_id)
     s_mention = s_role.mention if s_role else f"`{s_role_id}`"
 
-    await interaction.response.send_message(
+    await interaction.followup.send(
         f"✅ **ติดตั้ง Ticket Panel สำเร็จแล้ว!**\n"
         f"• **ห้องติดตั้ง:** {target_channel.mention}\n"
         f"• **ทีมงานดูแล:** {s_mention}\n"
@@ -2063,8 +2077,34 @@ def start_role_bot(token: Optional[str] = None):
     if not bot_token:
         print("[ERROR] No Discord Token provided for Bot.")
         return
-    print(f"[*] Starting Get-ROLE & Get-Script Bot...")
-    role_bot.run(bot_token)
+    print(f"[*] Starting Get-ROLE & Get-Script Bot...", flush=True)
+    try:
+        role_bot.run(bot_token)
+    except discord.errors.HTTPException as exc:
+        msg = str(exc)
+        print(f"[-] Discord HTTP error ({getattr(exc, 'status', '?')}): {msg}", flush=True)
+        if getattr(exc, "status", None) == 429 or "1015" in msg or "rate limited" in msg.lower() or "access denied" in msg.lower():
+            sup_dir = os.environ.get("HUB_SUPERVISOR_DIR")
+            if sup_dir:
+                try:
+                    from bot.hub_runtime import atomic_json
+                    atomic_json(Path(sup_dir) / "cooldown.json", {"reason": "discord-429-or-1015", "seconds": 900, "pid": os.getpid()})
+                except Exception:
+                    pass
+            sys.exit(10)
+        raise
+    except Exception as exc:
+        msg = str(exc)
+        if "429" in msg or "1015" in msg or "rate limited" in msg.lower():
+            sup_dir = os.environ.get("HUB_SUPERVISOR_DIR")
+            if sup_dir:
+                try:
+                    from bot.hub_runtime import atomic_json
+                    atomic_json(Path(sup_dir) / "cooldown.json", {"reason": "discord-429-or-1015", "seconds": 900, "pid": os.getpid()})
+                except Exception:
+                    pass
+            sys.exit(10)
+        raise
 
 
 if __name__ == "__main__":

@@ -102,6 +102,115 @@ PROJECTS_FILE = BASE_DIR / "projects.json"
 # สคริปต์เริ่มต้นสำหรับปุ่ม Get Script
 DEFAULT_SCRIPT = LOADER_SCRIPTHUB
 
+# =========================================================================
+# 🌐 HARDENED CLOUD HTTP HELPERS (curl_cffi chrome124 -> TLS 1.2 aiohttp)
+# =========================================================================
+import ssl
+
+CLOUD_PRIMARY_BASE = "https://payomboyzcreative.online"
+CLOUD_FALLBACK_BASES = [
+    base.rstrip("/")
+    for base in (
+        os.getenv("WHITELIST_FALLBACK_BASE", "https://payomboyz-whitelist.vercel.app"),
+    )
+    if base and base.strip()
+]
+
+
+def _make_hardened_ssl_context() -> ssl.SSLContext:
+    ctx = ssl.create_default_context()
+    try:
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    except Exception:
+        pass
+    try:
+        ctx.set_alpn_protocols(["http/1.1"])
+    except Exception:
+        pass
+    return ctx
+
+
+def _expand_cloud_urls(url: str) -> List[str]:
+    clean = (url or "").strip()
+    if not clean:
+        return []
+    urls = [clean]
+    if clean.startswith(CLOUD_PRIMARY_BASE):
+        suffix = clean[len(CLOUD_PRIMARY_BASE):]
+        for fb in CLOUD_FALLBACK_BASES:
+            alt = f"{fb}{suffix}"
+            if alt not in urls:
+                urls.append(alt)
+    return urls
+
+
+async def _single_http_json(method: str, url: str, headers: Optional[dict] = None, json_payload: Optional[dict] = None, timeout_sec: float = 10.0) -> Tuple[int, dict, Optional[Exception]]:
+    # 1. Try curl_cffi browser impersonation (eliminates Cloudflare/Vercel JA3 TLS handshake resets)
+    try:
+        from curl_cffi.requests import AsyncSession
+        async with AsyncSession(impersonate="chrome124") as session:
+            if method.upper() == "POST":
+                resp = await session.post(url, json=json_payload, headers=headers or {}, timeout=timeout_sec)
+            else:
+                resp = await session.get(url, headers=headers or {}, timeout=timeout_sec)
+            try:
+                data = resp.json()
+                if not isinstance(data, dict):
+                    data = {"success": resp.status_code < 400, "data": data}
+            except Exception:
+                data = {"success": False, "message": (resp.text or "")[:300]}
+            return int(resp.status_code), data, None
+    except Exception as cf_err:
+        last_err = cf_err
+
+    # 2. Fallback to aiohttp with explicit TLSv1.2 + http/1.1 ALPN
+    try:
+        connector = aiohttp.TCPConnector(ssl=_make_hardened_ssl_context())
+        timeout_obj = aiohttp.ClientTimeout(total=timeout_sec)
+        async with aiohttp.ClientSession(connector=connector) as session:
+            req_fn = session.post if method.upper() == "POST" else session.get
+            kwargs = {"headers": headers or {}, "timeout": timeout_obj}
+            if method.upper() == "POST":
+                kwargs["json"] = json_payload
+            async with req_fn(url, **kwargs) as resp:
+                try:
+                    data = await resp.json(content_type=None)
+                    if not isinstance(data, dict):
+                        data = {"success": resp.status < 400, "data": data}
+                except Exception:
+                    txt = await resp.text()
+                    data = {"success": False, "message": txt[:300]}
+                return int(resp.status), data, None
+    except Exception as aio_err:
+        return 0, {"success": False, "message": str(aio_err)}, aio_err
+
+
+async def _cloud_post_json(url: str, json_payload: dict, headers: Optional[dict] = None, timeout_sec: float = 10.0) -> Tuple[int, dict]:
+    last_err = None
+    for target_url in _expand_cloud_urls(url):
+        status, data, err = await _single_http_json("POST", target_url, headers=headers, json_payload=json_payload, timeout_sec=timeout_sec)
+        if err is None and status > 0 and status < 500:
+            return status, data
+        if err is not None:
+            last_err = err
+        elif status >= 500:
+            last_err = RuntimeError(f"HTTP {status}: {data.get('message') or data.get('error') or 'Server error'}")
+    raise last_err if last_err else RuntimeError("Cloud POST failed across all endpoints")
+
+
+async def _cloud_get_json(url: str, headers: Optional[dict] = None, timeout_sec: float = 10.0) -> Tuple[int, dict]:
+    last_err = None
+    for target_url in _expand_cloud_urls(url):
+        status, data, err = await _single_http_json("GET", target_url, headers=headers, json_payload=None, timeout_sec=timeout_sec)
+        if err is None and status > 0 and status < 500:
+            return status, data
+        if err is not None:
+            last_err = err
+        elif status >= 500:
+            last_err = RuntimeError(f"HTTP {status}: {data.get('message') or data.get('error') or 'Server error'}")
+    raise last_err if last_err else RuntimeError("Cloud GET failed across all endpoints")
+
+
 
 def resolve_role_for_key(key_str: str, role_hint: Optional[str] = None, project_hint: Optional[str] = None) -> Tuple[int, str]:
     """
@@ -2877,17 +2986,10 @@ class RedeemKeyModal(discord.ui.Modal, title="Redeem a key"):
 
 
 
-            if role not in member.roles:
-                try:
-                    await member.add_roles(role, reason=f"Redeemed Key for {pname}")
-                except Exception:
-                    pass
-
-
-
             try:
 
-                await member.add_roles(role, reason=f"Redeemed Key for {pname}")
+                if role not in member.roles:
+                    await member.add_roles(role, reason=f"Redeemed Key for {pname}")
 
                 if not is_master_key:
 
@@ -2960,175 +3062,88 @@ class RedeemKeyModal(discord.ui.Modal, title="Redeem a key"):
 
 
         try:
-
-            import aiohttp
-
             headers = {
-
                 "Authorization": f"Bearer {cloud_api_key}",
-
-                "Content-Type": "application/json"
-
+                "X-API-Key": cloud_api_key,
+                "Content-Type": "application/json",
+                "User-Agent": "PAYOMBOYZ-Discord-Bot/4.0",
             }
-
             payload = {
-
                 "action": "redeem",
-
                 "key": key,
-
                 "discord_id": str(member.id),
-
                 "discord_name": member.name,
-
-                "project_id": self.project_id
-
+                "project_id": self.project_id,
             }
-
-            async with aiohttp.ClientSession() as session:
-
-                async with session.post(cloud_api_url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as resp:
-
-                    res_data = await resp.json()
-
-                    if resp.status == 200 and res_data.get("success"):
-
-                        cloud_redeem_success = True
-
-                        cloud_role_name = res_data.get("role", "VIP")
-
-                        expires_at = res_data.get("expires_at")
-
-                        
-
-                        # กำหนด Role ที่จะมอบตามการจำแนกยศ 3 ระดับ
-                        target_role_id, role_title = resolve_role_for_key(key, role_hint=cloud_role_name, project_hint=self.project_id)
-                        grant_role = guild.get_role(target_role_id)
-                        if not grant_role:
-                            for r in guild.roles:
-                                if r.name.upper() == cloud_role_name.upper():
-                                    grant_role = r
-                                    break
-                        grant_role = grant_role or role
-
-
-
-                        if key_only:
-
-                            project.setdefault("authorized_users", {})[f"{guild.id}:{member.id}"] = True
-
-                            project.setdefault("redeemed_users", {})[key] = {
-
-                                "user_id": member.id,
-
-                                "user_name": member.name,
-
-                                "time": int(time.time()),
-
-                                "cloud": True,
-
-                                "tier": cloud_role_name
-
-                            }
-
-                            upsert_project(project)
-
-                            await interaction.followup.send(f"{EMOJI_CHILL} **ยืนยันคีย์สำเร็จ (payomboyz.shop)!** กดปุ่ม Get Script เพื่อรับสคริปต์ได้เลย", ephemeral=True)
-
-                            return
-
-
-
-                        if grant_role and grant_role not in member.roles:
-                            try:
-                                await member.add_roles(grant_role, reason=f"Redeemed Cloud/Shop Key ({cloud_role_name}) for {pname}")
-                            except Exception:
-                                pass
-
-
-
-                        if grant_role:
-
-                            try:
-
-                                await member.add_roles(grant_role, reason=f"Redeemed Cloud/Shop Key ({cloud_role_name}) for {pname}")
-
-                            except discord.Forbidden:
-
-                                await interaction.followup.send(
-
-                                    f"{EMOJI_ANGRY} บอทไม่มีสิทธิ์มอบบทบาทนี้ โปรดแจ้งแอดมินให้เลื่อนตำแหน่ง Role บอทให้อยู่สูงกว่าบทบาทนี้",
-
-                                    ephemeral=True
-
-                                )
-
-                                return
-
-
-
-                        project.setdefault("redeemed_users", {})[key] = {
-
-                            "user_id": member.id,
-
-                            "user_name": member.name,
-
-                            "time": int(time.time()),
-
-                            "cloud": True,
-
-                            "tier": cloud_role_name
-
-                        }
-
-                        upsert_project(project)
-
-
-
-                        expiry_msg = f"• **วันหมดอายุ:** `{expires_at}`\n" if expires_at else "• **ระยะเวลา:** `ถาวร (Lifetime)`\n"
-
-                        embed = discord.Embed(
-
-                            title=f"{EMOJI_KING} ยืนยันคีย์สำเร็จ (payomboyz.shop)",
-
-                            description=(
-
-                                f"{EMOJI_FIRE} **ยืนยันคีย์จาก Website / Shop สำเร็จเรียบร้อย!**\n\n"
-
-                                f"• **รหัสคีย์:** `{key[:8]}...{key[-4:]}`\n"
-
-                                f"• **ระดับสิทธิ์ (Tier):** `{cloud_role_name}`\n"
-
-                                f"{expiry_msg}"
-
-                                f"{EMOJI_PAYOMBOYZ} **บทบาทที่ได้รับ:** {grant_role.mention if grant_role else 'VVIP'}\n\n"
-
-                                f"{EMOJI_SUKUNA} *กดปุ่ม **Get Script** ด้านล่างเพื่อรับสคริปต์ไปใช้งานได้ทันที*"
-
-                            ),
-
-                            color=0x1a1a1a
-
-                        )
-
-                        embed.set_footer(text="PAYOMBØYZ WHITELIST • คีย์เชื่อมโยง payomboyz.shop และ Hub เรียบร้อย")
-
-                        await interaction.followup.send(embed=embed, ephemeral=True)
-
-                        return
-
-                    elif resp.status in (403, 409):
-
+            resp_status, res_data = await _cloud_post_json(cloud_api_url, payload, headers=headers, timeout_sec=10.0)
+            if resp_status == 200 and res_data.get("success"):
+                cloud_redeem_success = True
+                cloud_role_name = res_data.get("role", "VIP")
+                expires_at = res_data.get("expires_at")
+
+                target_role_id, role_title = resolve_role_for_key(key, role_hint=cloud_role_name, project_hint=self.project_id)
+                grant_role = guild.get_role(target_role_id)
+                if not grant_role:
+                    for r in guild.roles:
+                        if r.name.upper() == cloud_role_name.upper():
+                            grant_role = r
+                            break
+                grant_role = grant_role or role
+
+                if key_only:
+                    project.setdefault("authorized_users", {})[f"{guild.id}:{member.id}"] = True
+                    project.setdefault("redeemed_users", {})[key] = {
+                        "user_id": member.id,
+                        "user_name": member.name,
+                        "time": int(time.time()),
+                        "cloud": True,
+                        "tier": cloud_role_name,
+                    }
+                    upsert_project(project)
+                    await interaction.followup.send(f"{EMOJI_CHILL} **ยืนยันคีย์สำเร็จ (payomboyz.shop)!** กดปุ่ม Get Script เพื่อรับสคริปต์ได้เลย", ephemeral=True)
+                    return
+
+                if grant_role and grant_role not in member.roles:
+                    try:
+                        await member.add_roles(grant_role, reason=f"Redeemed Cloud/Shop Key ({cloud_role_name}) for {pname}")
+                    except discord.Forbidden:
                         await interaction.followup.send(
-
-                            f"{EMOJI_ANGRY} **{res_data.get('message', 'คีย์นี้ถูกใช้งานไปแล้ว หรือหมดอายุแล้ว')}**",
-
-                            ephemeral=True
-
+                            f"{EMOJI_ANGRY} บอทไม่มีสิทธิ์มอบบทบาทนี้ โปรดแจ้งแอดมินให้เลื่อนตำแหน่ง Role บอทให้อยู่สูงกว่าบทบาทนี้",
+                            ephemeral=True,
                         )
-
                         return
 
+                project.setdefault("redeemed_users", {})[key] = {
+                    "user_id": member.id,
+                    "user_name": member.name,
+                    "time": int(time.time()),
+                    "cloud": True,
+                    "tier": cloud_role_name,
+                }
+                upsert_project(project)
+
+                expiry_msg = f"• **วันหมดอายุ:** `{expires_at}`\n" if expires_at else "• **ระยะเวลา:** `ถาวร (Lifetime)`\n"
+                embed = discord.Embed(
+                    title=f"{EMOJI_KING} ยืนยันคีย์สำเร็จ (payomboyz.shop)",
+                    description=(
+                        f"{EMOJI_FIRE} **ยืนยันคีย์จาก Website / Shop สำเร็จเรียบร้อย!**\n\n"
+                        f"• **รหัสคีย์:** `{key[:8]}...{key[-4:]}`\n"
+                        f"• **ระดับสิทธิ์ (Tier):** `{cloud_role_name}`\n"
+                        f"{expiry_msg}"
+                        f"{EMOJI_PAYOMBOYZ} **บทบาทที่ได้รับ:** {grant_role.mention if grant_role else 'VVIP'}\n\n"
+                        f"{EMOJI_SUKUNA} *กดปุ่ม **Get Script** ด้านล่างเพื่อรับสคริปต์ไปใช้งานได้ทันที*"
+                    ),
+                    color=0x1a1a1a,
+                )
+                embed.set_footer(text="PAYOMBØYZ WHITELIST • คีย์เชื่อมโยง payomboyz.shop และ Hub เรียบร้อย")
+                await interaction.followup.send(embed=embed, ephemeral=True)
+                return
+            elif resp_status in (403, 409):
+                await interaction.followup.send(
+                    f"{EMOJI_ANGRY} **{res_data.get('message', 'คีย์นี้ถูกใช้งานไปแล้ว หรือหมดอายุแล้ว')}**",
+                    ephemeral=True,
+                )
+                return
         except Exception as cloud_err:
 
             print(f"[-] Cloud whitelist redeem notice: {cloud_err}", flush=True)
@@ -3178,24 +3193,136 @@ async def fetch_cloud_user_keys(discord_id: str) -> List[dict]:
     }
     keys_list = []
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    for item in data.get("keys", []):
-                        k_str = item.get("key") or item.get("key_string")
-                        if k_str:
-                            keys_list.append({
-                                "key": k_str,
-                                "role": item.get("role", "VIP"),
-                                "status": item.get("status", "active"),
-                                "expires_at": item.get("expires_at"),
-                                "isLifetime": item.get("isLifetime", not item.get("expires_at")),
-                                "created_at": item.get("created_at")
-                            })
+        resp_status, data = await _cloud_post_json(url, payload, headers=headers, timeout_sec=8.0)
+        if resp_status == 200:
+            for item in data.get("keys", []):
+                k_str = item.get("key") or item.get("key_string")
+                if k_str:
+                    keys_list.append({
+                        "key": k_str,
+                        "role": item.get("role", "VIP"),
+                        "status": item.get("status", "active"),
+                        "expires_at": item.get("expires_at"),
+                        "isLifetime": item.get("isLifetime", not item.get("expires_at")),
+                        "created_at": item.get("created_at")
+                    })
     except Exception as e:
         print(f"[-] fetch_cloud_user_keys error: {e}", flush=True)
     return keys_list
+
+async def sync_projects_from_cloud() -> List[dict]:
+    """
+    Sync official active projects from https://payomboyzcreative.online/api/v1/projects.
+    Preserves existing local keys, redeemed_users, authorized_users, panel_messages, and custom buttons.
+    """
+    projects_url = os.getenv("PROJECTS_API_URL", "https://payomboyzcreative.online/api/v1/projects")
+    headers = {
+        "Authorization": f"Bearer {PAYOMBOYZ_MASTER_KEY}",
+        "X-API-Key": PAYOMBOYZ_MASTER_KEY,
+        "Content-Type": "application/json",
+        "User-Agent": "PAYOMBOYZ-Discord-Bot/4.0",
+    }
+    try:
+        status, data = await _cloud_get_json(projects_url, headers=headers, timeout_sec=10.0)
+    except Exception as exc:
+        print(f"[-] sync_projects_from_cloud network error: {exc}", flush=True)
+        return []
+
+    if status != 200 or not isinstance(data, dict) or not data.get("success"):
+        print(f"[-] sync_projects_from_cloud HTTP {status}: {data}", flush=True)
+        return []
+
+    cloud_items = data.get("projects")
+    if not isinstance(cloud_items, list):
+        return []
+
+    projects = load_projects()
+    synced_summary: List[dict] = []
+    dirty = False
+
+    for cp in cloud_items:
+        if not isinstance(cp, dict) or cp.get("is_active") is False:
+            continue
+        pid = str(cp.get("id") or "").strip()
+        if not pid:
+            continue
+        cname = str(cp.get("name") or pid).strip()
+        category = str(cp.get("category") or "").upper()
+        min_role = str(cp.get("min_role") or "VIP").upper()
+        auth_mode = str(cp.get("auth_mode") or "KEYED").upper()
+        loader_url = str(cp.get("loader_url") or "").strip()
+
+        if "ai" in pid.lower() or "AI" in category:
+            default_role = ROLE_AI_DUMP
+            default_loader = LOADER_AI_DUMP
+        elif "scripthub" in pid.lower() or "SCRIPT_HUB" in category:
+            default_role = DEFAULT_VVIP_ROLE_ID
+            default_loader = LOADER_SCRIPTHUB
+        else:
+            default_role, _ = resolve_role_for_key("", role_hint=min_role, project_hint=pid)
+            default_loader = f'loadstring(game:HttpGet("{loader_url}"))()' if loader_url else DEFAULT_SCRIPT
+
+        loader_code = f'loadstring(game:HttpGet("{loader_url}"))()' if loader_url else default_loader
+        require_key = auth_mode != "FREE"
+
+        existing = projects.get(pid)
+        if isinstance(existing, dict):
+            if existing.get("name") != cname or existing.get("default_script") != loader_code or not existing.get("cloud_synced"):
+                existing["name"] = cname
+                existing["default_script"] = loader_code
+                existing["cloud_synced"] = True
+                existing["cloud_category"] = category
+                dirty = True
+            if not existing.get("role_id"):
+                existing["role_id"] = default_role
+                dirty = True
+            entry = existing
+        else:
+            entry = {
+                "id": pid,
+                "name": cname,
+                "type": "get_role",
+                "role_id": default_role,
+                "require_key": require_key,
+                "grant_mode": "key_role" if require_key else "free_role",
+                "default_script": loader_code,
+                "maps": [],
+                "keys": {},
+                "custom_buttons": [],
+                "panel_config": {
+                    "title": cname,
+                    "description": cp.get("description") or (
+                        f"แผงควบคุมสำหรับโปรเจกต์ **{cname}**\n"
+                        "ยืนยันคีย์เพื่อรับบทบาท (Redeem Key) หรือรับสคริปต์ล่าสุด (Get Script)"
+                    ),
+                    "color": "#FF0000",
+                    "image_url": None,
+                    "thumbnail_url": None,
+                    "footer": "PAYOMBØYZ HUB",
+                },
+                "cloud_synced": True,
+                "cloud_category": category,
+            }
+            projects[pid] = entry
+            dirty = True
+
+        # Keep alias panels (`ai_dump` / `payomboyz-hub`) loader URLs fresh without touching keys
+        alias_key = "ai_dump" if pid == "ai" else ("payomboyz-hub" if pid == "scripthub" else None)
+        if alias_key and isinstance(projects.get(alias_key), dict):
+            if projects[alias_key].get("default_script") != loader_code:
+                projects[alias_key]["default_script"] = loader_code
+                dirty = True
+
+        synced_summary.append({
+            "id": entry.get("id", pid),
+            "name": entry.get("name", cname),
+            "role_id": entry.get("role_id", default_role),
+        })
+
+    if dirty:
+        save_projects(projects)
+    return synced_summary
+
 
 async def redeem_cloud_key(key: str, discord_id: str, discord_name: str, project_id: str = "universal") -> dict:
     """Redeem/bind key against central Cloud Whitelist API (Supabase)"""
@@ -3214,11 +3341,9 @@ async def redeem_cloud_key(key: str, discord_id: str, discord_name: str, project
         "User-Agent": "PAYOMBOYZ-Discord-Bot/4.0"
     }
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                data = await resp.json()
-                data["_status_code"] = resp.status
-                return data
+        resp_status, data = await _cloud_post_json(url, payload, headers=headers, timeout_sec=10.0)
+        data["_status_code"] = resp_status
+        return data
     except Exception as e:
         return {"success": False, "message": f"เกิดข้อผิดพลาดในการเชื่อมต่อกับเซิร์ฟเวอร์ Cloud: {e}", "_status_code": 500}
 
@@ -3238,10 +3363,8 @@ async def perform_cloud_hwid_reset(key: str, project_id: str, actor: str) -> dic
         "User-Agent": "PAYOMBOYZ-Discord-Bot/4.0"
     }
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                data = await resp.json()
-                return data
+        _resp_status, data = await _cloud_post_json(url, payload, headers=headers, timeout_sec=10.0)
+        return data
     except Exception as e:
         return {
             "success": False,
@@ -3524,7 +3647,8 @@ class ScriptCenterPanelView(discord.ui.View):
         row=0
     )
     async def btn_link(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(SCLinkKeyModal(self.role_id))
+        if not interaction.response.is_done():
+            await interaction.response.send_modal(SCLinkKeyModal(self.role_id))
 
     @discord.ui.button(
         label="คีย์ของฉัน",
@@ -3534,7 +3658,8 @@ class ScriptCenterPanelView(discord.ui.View):
         row=0
     )
     async def btn_my_keys(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
         uid = str(interaction.user.id)
         all_keys = await fetch_cloud_user_keys(uid)
 
@@ -3565,7 +3690,8 @@ class ScriptCenterPanelView(discord.ui.View):
         row=0
     )
     async def btn_check_expiry(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
         uid = str(interaction.user.id)
         all_keys = await fetch_cloud_user_keys(uid)
 
@@ -3616,7 +3742,8 @@ class ScriptCenterPanelView(discord.ui.View):
         row=1
     )
     async def btn_loader(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
         embed = discord.Embed(
             title=f"{EMOJI_KING} PAYOMBØYZ SCRIPT HUB | UNIVERSAL LOADER",
             description=(
@@ -3640,7 +3767,8 @@ class ScriptCenterPanelView(discord.ui.View):
         row=1
     )
     async def btn_reset_hwid(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(SCResetHWIDModal())
+        if not interaction.response.is_done():
+            await interaction.response.send_modal(SCResetHWIDModal())
 
 
 class AIDumpKeyManagementPanelView(discord.ui.View):
@@ -3664,7 +3792,8 @@ class AIDumpKeyManagementPanelView(discord.ui.View):
         row=0
     )
     async def btn_link(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(AIDumpLinkKeyModal(self.role_id))
+        if not interaction.response.is_done():
+            await interaction.response.send_modal(AIDumpLinkKeyModal(self.role_id))
 
     @discord.ui.button(
         label="คีย์ของฉัน",
@@ -3674,7 +3803,8 @@ class AIDumpKeyManagementPanelView(discord.ui.View):
         row=0
     )
     async def btn_my_keys(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
         all_keys = await fetch_cloud_user_keys(str(interaction.user.id))
 
         if not all_keys:
@@ -3704,7 +3834,8 @@ class AIDumpKeyManagementPanelView(discord.ui.View):
         row=0
     )
     async def btn_check_expiry(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
         all_keys = await fetch_cloud_user_keys(str(interaction.user.id))
 
         if not all_keys:
@@ -3754,7 +3885,8 @@ class AIDumpKeyManagementPanelView(discord.ui.View):
         row=1
     )
     async def btn_loader(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
         embed = discord.Embed(
             title=f"{EMOJI_KING} PAYOMBØYZ | AI SCRIPT DUMP MAP LOADER",
             description=(
@@ -3778,7 +3910,8 @@ class AIDumpKeyManagementPanelView(discord.ui.View):
         row=1
     )
     async def btn_reset_hwid(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(AIDumpResetHWIDModal())
+        if not interaction.response.is_done():
+            await interaction.response.send_modal(AIDumpResetHWIDModal())
 
 
 class LegacyAIDumpFallbackView(discord.ui.View):
@@ -3793,11 +3926,13 @@ class LegacyAIDumpFallbackView(discord.ui.View):
 
     @discord.ui.button(label="Redeem Key", style=discord.ButtonStyle.primary, custom_id="payom_redeem_ai_dump")
     async def btn_redeem_legacy(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(AIDumpLinkKeyModal(ROLE_AI_DUMP))
+        if not interaction.response.is_done():
+            await interaction.response.send_modal(AIDumpLinkKeyModal(ROLE_AI_DUMP))
 
     @discord.ui.button(label="Check Role", style=discord.ButtonStyle.secondary, custom_id="payom_checkrole_ai_dump")
     async def btn_checkrole_legacy(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
         guild = interaction.guild
         member = interaction.user
         role = guild.get_role(ROLE_AI_DUMP) if guild else None
@@ -3814,7 +3949,8 @@ class LegacyAIDumpFallbackView(discord.ui.View):
 
     @discord.ui.button(label="Get Script", style=discord.ButtonStyle.success, custom_id="payom_script_ai_dump")
     async def btn_script_legacy(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
         embed = discord.Embed(
             title=f"{EMOJI_KING} PAYOMBØYZ | AI SCRIPT DUMP MAP LOADER",
             description=(
@@ -3921,15 +4057,14 @@ async def perform_cloud_hwid_reset(key: str, project_id: str, actor: str) -> dic
         "actor": actor
     }
     headers = {
+        "Authorization": f"Bearer {PAYOMBOYZ_MASTER_KEY}",
         "Content-Type": "application/json",
         "X-API-Key": PAYOMBOYZ_MASTER_KEY,
         "User-Agent": "PAYOMBOYZ-Discord-Bot/4.0"
     }
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                data = await resp.json()
-                return data
+        _resp_status, data = await _cloud_post_json(url, payload, headers=headers, timeout_sec=10.0)
+        return data
     except Exception as e:
         return {
             "success": False,
@@ -4909,7 +5044,7 @@ class GetRolePanelView(discord.ui.View):
 
 
 
-                await interaction.response.send_message(embed=embed, ephemeral=True)
+                await self._send_reply(interaction, embed=embed)
 
 
 
@@ -4917,7 +5052,9 @@ class GetRolePanelView(discord.ui.View):
 
 
 
-                await interaction.response.send_modal(RedeemKeyModal(self.project_id))
+                if not interaction.response.is_done():
+
+                    await interaction.response.send_modal(RedeemKeyModal(self.project_id))
 
 
 
@@ -5001,7 +5138,9 @@ class GetRolePanelView(discord.ui.View):
 
 
 
-        await interaction.response.send_modal(RedeemKeyModal(self.project_id))
+        if not interaction.response.is_done():
+
+            await interaction.response.send_modal(RedeemKeyModal(self.project_id))
 
 
 
@@ -6088,7 +6227,10 @@ class NoKeyPanelView(discord.ui.View):
 
 
 
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            if interaction.response.is_done():
+                await interaction.followup.send(embed=embed, ephemeral=True)
+            else:
+                await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 
@@ -6116,7 +6258,10 @@ class NoKeyPanelView(discord.ui.View):
 
 
 
-                await interaction.response.send_message("❌ ไม่พบข้อมูลแมพนี้แล้ว โปรดติดตั้งแผงใหม่", ephemeral=True)
+                if interaction.response.is_done():
+                    await interaction.followup.send("❌ ไม่พบข้อมูลแมพนี้แล้ว โปรดติดตั้งแผงใหม่", ephemeral=True)
+                else:
+                    await interaction.response.send_message("❌ ไม่พบข้อมูลแมพนี้แล้ว โปรดติดตั้งแผงใหม่", ephemeral=True)
 
 
 
@@ -6164,7 +6309,10 @@ class NoKeyPanelView(discord.ui.View):
 
 
 
-            await interaction.response.send_message(embed=embed, file=file, ephemeral=True)
+            if interaction.response.is_done():
+                await interaction.followup.send(embed=embed, file=file, ephemeral=True)
+            else:
+                await interaction.response.send_message(embed=embed, file=file, ephemeral=True)
 
 
 
@@ -6228,7 +6376,10 @@ class NoKeyPanelView(discord.ui.View):
 
 
 
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        if interaction.response.is_done():
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        else:
+            await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 
@@ -6244,7 +6395,10 @@ class NoKeyPanelView(discord.ui.View):
 
 
 
-            await interaction.response.send_message("❌ ไม่พบข้อมูลโปรเจกต์นี้ในระบบ", ephemeral=True)
+            if interaction.response.is_done():
+                await interaction.followup.send("❌ ไม่พบข้อมูลโปรเจกต์นี้ในระบบ", ephemeral=True)
+            else:
+                await interaction.response.send_message("❌ ไม่พบข้อมูลโปรเจกต์นี้ในระบบ", ephemeral=True)
 
 
 
@@ -6344,243 +6498,116 @@ class NoKeyPanelView(discord.ui.View):
 
 
 
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        if interaction.response.is_done():
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        else:
+            await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 
 class PersistentFallbackRoleView(discord.ui.View):
+    """View เสริมสำหรับลงทะเบียน Custom ID ที่ยังไม่ได้ถูกจดทะเบียนจาก View หลัก (ป้องกัน custom_id ซ้ำ)"""
 
-
-
-    """View เสริมสำหรับลงทะเบียน Custom ID ทั้งหมดเพื่อป้องกัน Interaction Failed บนข้อความเดิม"""
-
-
-
-    def __init__(self, project_id: str):
-
-
-
+    def __init__(self, project_id: str, exclude_custom_ids: Optional[set] = None):
         super().__init__(timeout=None)
-
-
-
         self.project_id = project_id
+        excluded = exclude_custom_ids or set()
 
-
-
-        # Register all button IDs for fallback
-
-
-
-        b_redeem = discord.ui.Button(custom_id=f"payom_redeem_{project_id}")
-
-
-
-        b_redeem.callback = self._redeem_cb
-
-
-
-        self.add_item(b_redeem)
-
-
-
-        b_claim = discord.ui.Button(custom_id=f"payom_claimrole_{project_id}")
-
-
-
-        b_claim.callback = self._claim_cb
-
-
-
-        self.add_item(b_claim)
-
-
-
-        b_check = discord.ui.Button(custom_id=f"payom_checkrole_{project_id}")
-
-
-
-        b_check.callback = self._check_cb
-
-
-
-        self.add_item(b_check)
-
-
-
-        b_script = discord.ui.Button(custom_id=f"payom_script_{project_id}")
-
-
-
-        b_script.callback = self._script_cb
-
-
-
-        self.add_item(b_script)
-
-
+        fallback_specs = [
+            (f"payom_redeem_{project_id}", self._redeem_cb),
+            (f"payom_claimrole_{project_id}", self._claim_cb),
+            (f"payom_checkrole_{project_id}", self._check_cb),
+            (f"payom_script_{project_id}", self._script_cb),
+        ]
+        for cid, cb in fallback_specs:
+            if cid not in excluded:
+                btn = discord.ui.Button(custom_id=cid)
+                btn.callback = cb
+                self.add_item(btn)
 
     async def _redeem_cb(self, interaction: discord.Interaction):
-
-
-
-        await interaction.response.send_modal(RedeemKeyModal(self.project_id))
-
-
+        if not interaction.response.is_done():
+            await interaction.response.send_modal(RedeemKeyModal(self.project_id))
 
     async def _claim_cb(self, interaction: discord.Interaction):
-
-
-
         temp_view = GetRolePanelView(self.project_id)
-
-
-
         await temp_view._claim_role_callback(interaction)
 
-
-
     async def _check_cb(self, interaction: discord.Interaction):
-
-
-
         temp_view = GetRolePanelView(self.project_id)
-
-
-
         await temp_view._check_role_callback(interaction)
 
-
-
     async def _script_cb(self, interaction: discord.Interaction):
-
-
-
         temp_view = GetRolePanelView(self.project_id)
-
-
-
         await temp_view._script_callback(interaction)
 
 
-
 # =========================================================================
-
-
-
 # 🔄 REGISTER ALL VIEWS INTO BOT
-
-
-
 # =========================================================================
 
+def _view_custom_ids(view: discord.ui.View) -> set:
+    return {
+        getattr(item, "custom_id", None)
+        for item in getattr(view, "children", [])
+        if getattr(item, "custom_id", None)
+    }
+
+
+def _register_deduped_view(bot: discord.Client, view: discord.ui.View, registered_cids: set) -> bool:
+    for item in list(getattr(view, "children", [])):
+        cid = getattr(item, "custom_id", None)
+        if cid and cid in registered_cids:
+            view.remove_item(item)
+    new_cids = _view_custom_ids(view)
+    if not view.children:
+        return False
+    bot.add_view(view)
+    registered_cids.update(new_cids)
+    return True
 
 
 def register_all_panel_views(bot: discord.Client):
-
-
-
-    """ลงทะเบียน Persistent Views ทั้งหมดเพื่อให้ปุ่มและ buttons ทำงานได้ตลอดเวลาหลังรีสตาร์ท"""
-
-
-
+    """Register all persistent views without duplicate custom_id collisions."""
     projects = load_projects()
-
-
-
     registered_count = 0
-
-
+    registered_cids = set()
 
     for pid, pdata in projects.items():
-
-
-
+        if not isinstance(pdata, dict):
+            continue
         ptype = pdata.get("type", "get_role")
-
-
-
         if ptype == "get_script_no_key":
-
-
-
-            bot.add_view(NoKeyPanelView(pid))
-
-
-
-            registered_count += 1
-
-
-
+            if _register_deduped_view(bot, NoKeyPanelView(pid), registered_cids):
+                registered_count += 1
         else:
-
-
-
-            bot.add_view(GetRolePanelView(pid, pdata.get("default_script", DEFAULT_SCRIPT)))
-
-
-
-            # ลงทะเบียน fallback เพื่อรองรับทั้งโหมดมีคีย์และไม่มีคีย์
-
-
-
-            bot.add_view(PersistentFallbackRoleView(pid))
-
-
-
-            registered_count += 2
-
-
-
-    # ลงทะเบียน legacy panels เพื่อรองรับข้อความเดิมในห้องแชท
-
-
+            main_view = GetRolePanelView(pid, pdata.get("default_script", DEFAULT_SCRIPT))
+            if _register_deduped_view(bot, main_view, registered_cids):
+                registered_count += 1
+            fb_view = PersistentFallbackRoleView(pid, exclude_custom_ids=registered_cids)
+            if _register_deduped_view(bot, fb_view, registered_cids):
+                registered_count += 1
 
     legacy_panels = load_panel_configs()
-
-
-
     for role_id_str, cfg in legacy_panels.items():
-
-
-
         try:
-
-
-
             r_id = int(role_id_str)
-
-
-
-            bot.add_view(GetRolePanelView(str(r_id), cfg.get("script_text", DEFAULT_SCRIPT)))
-
-
-
-            registered_count += 1
-
-
-
+            if _register_deduped_view(bot, GetRolePanelView(str(r_id), cfg.get("script_text", DEFAULT_SCRIPT)), registered_cids):
+                registered_count += 1
         except Exception:
-
-
-
             pass
 
-
-
-    # ลงทะเบียน Whitelist & Loader Panels (ScriptHub & AI Dump Map)
     try:
-        bot.add_view(ScriptCenterPanelView())
-        bot.add_view(AIDumpKeyManagementPanelView())
-        bot.add_view(LegacyAIDumpFallbackView())
-        bot.add_view(ResetHwidPanelView())
-        registered_count += 4
+        for view in (
+            ScriptCenterPanelView(),
+            AIDumpKeyManagementPanelView(),
+            LegacyAIDumpFallbackView(),
+            ResetHwidPanelView(),
+        ):
+            if _register_deduped_view(bot, view, registered_cids):
+                registered_count += 1
     except Exception as e:
         print(f"[-] Failed to register Whitelist Panels: {e}", flush=True)
-
-
-
-    # ลงทะเบียน FindTokenPanelView (Auto Quest Token Extractor)
 
     try:
 
