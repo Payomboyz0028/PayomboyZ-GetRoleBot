@@ -115,7 +115,7 @@ __________  _____ _____.___.________      _____ __________ ________ _____.___.__
  |    |  /    |    \____   |/    |    \/    Y    \    |   \/    |    \____   | /     /_ 
  |____|  \____|__  / ______|\_______  /\____|__  /______  /\_______  / ______|/_______ \
                  \/\/               \/         \/       \/         \/\/               \/
-          \_Welcome to PAYOMBOYZ Security (Sentinel Engine v2.0) ~ Much Love, dj
+          \_Welcome to PAYOMBOYZ Security (Sentinel Engine v4.4) ~ Much Love, dj
 
 ]]--"""
 
