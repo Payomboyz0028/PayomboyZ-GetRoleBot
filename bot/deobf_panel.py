@@ -398,13 +398,21 @@ async def dispatch_result_to_channel_or_interaction(
 
     # 1. ALWAYS deliver directly to the user who requested it!
     delivered = False
-    action_view = DeobfResultActionView() if action_type == "DEOBFUSCATE" else None
+    send_kwargs = {"embed": embed, "files": user_files}
+    if action_type == "DEOBFUSCATE":
+        send_kwargs["view"] = DeobfResultActionView()
     try:
-        await interaction.followup.send(embed=embed, files=user_files, view=action_view, ephemeral=True)
+        await interaction.followup.send(**send_kwargs, ephemeral=True)
         delivered = True
     except Exception:
+        for uf in user_files:
+            if hasattr(uf, "fp") and hasattr(uf.fp, "seek"):
+                try:
+                    uf.fp.seek(0)
+                except Exception:
+                    pass
         try:
-            await interaction.followup.send(embed=embed, files=user_files, view=action_view)
+            await interaction.followup.send(**send_kwargs)
             delivered = True
         except Exception as e:
             print(f"[PANEL DISPATCH] Followup delivery fallback: {e}", flush=True)
